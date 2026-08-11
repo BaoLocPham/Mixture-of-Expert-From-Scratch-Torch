@@ -20,6 +20,7 @@ class Expert(nn.Module):
 class DenseMoE(nn.Module):
     def __init__(self, d_model, d_ff, n_experts):
         super().__init__()
+        self.d_model, self.d_ff, self.n_experts = d_model, d_ff, n_experts
         self.gate = nn.Linear(d_model, n_experts, bias=False)   # weight (N, d)
         self.experts = nn.ModuleList([Expert(d_model, d_ff) for _ in range(n_experts)])
 
@@ -77,3 +78,52 @@ class DenseMoE(nn.Module):
         # multiply all d of that expert's output dims, so it needs a trailing
         # size-1 axis to broadcast along d. Then sum away the expert axis (-2).
         return (w.unsqueeze(-1) * outs).sum(dim=-2)             # (B, T, d)
+
+    # ---------------------------------------------------------------------
+    # Two more spellings of forward(), kept as cross-checks rather than for
+    # use. Anything that computes the same thing a second way is a test you
+    # get for free - see run_dense_moe.py section 2.
+    # ---------------------------------------------------------------------
+
+    def forward_loop(self, x):
+        """forward() as explicit python loops. Slow, and the one to trust.
+
+        Every tensor in here is 1-D or scalar, which is the point: `self.gate(h)`
+        is (N,), so a softmax over it has only one axis to pick, and `gw[j]` is a
+        scalar, so no broadcast has to line up. Neither of the two mistakes the
+        vectorised version can make silently is even expressible here. When the
+        two disagree, this is the one that's right.
+        """
+        B, T, d = x.shape                       # B and T come from the DATA, not
+        y = torch.zeros_like(x)                 # from self - the layer is
+        for b in range(B):                      # agnostic to batch and length.
+            for t in range(T):
+                h = x[b, t]                                     # (d,)
+                gw = F.softmax(self.gate(h), dim=-1)            # (N,)
+                acc = torch.zeros_like(h)                       # (d,)
+                for j, e in enumerate(self.experts):
+                    acc = acc + gw[j] * e(h)                    # scalar * (d,)
+                y[b, t] = acc
+        return y
+
+    def forward_einsum(self, x):
+        """forward() with the combine written as one einsum.
+
+        'btn,btnd->btd': n appears on both inputs and not on the output, so n is
+        the summed index. That single letter replaces unsqueeze + multiply + sum.
+        """
+        w = F.softmax(self.gate(x), dim=-1)                     # (B, T, N)
+        outs = torch.stack([e(x) for e in self.experts], dim=-2)  # (B, T, N, d)
+        return torch.einsum('btn,btnd->btd', w, outs)           # (B, T, d)
+
+    def macs_per_token(self):
+        """Multiply-accumulates per token for one forward pass, derived not measured.
+
+        Linear layers only. A Linear (p -> q) costs p*q MACs per token, each
+        expert is two of them, and the gate is d*N. Compare the result to
+        sum(p.numel() for p in self.parameters()): the two are equal, because a
+        dense layer spends exactly one MAC per parameter per token. That identity
+        is the bottleneck in one line.
+        """
+        per_expert = 2 * self.d_model * self.d_ff
+        return self.d_model * self.n_experts + self.n_experts * per_expert

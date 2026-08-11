@@ -62,14 +62,22 @@ BROADCAST_HINT = (
 
 
 def call(fn, *a, **kw):
-    """Run a student function, turning shape RuntimeErrors into a real hint."""
+    """Run a student function, turning common failures into real hints."""
     try:
-        return fn(*a, **kw)
+        out = fn(*a, **kw)
     except RuntimeError as ex:
         msg = str(ex)
         if "size" in msg or "broadcast" in msg or "shape" in msg:
             raise Fail(f"raised a shape error:\n   {msg.splitlines()[0]}", BROADCAST_HINT)
         raise
+    if out is None:
+        raise Fail(
+            "returned None instead of a tensor",
+            "A python function with no `return` hands back None. If you built "
+            "the answer up in a local variable, the last thing the function "
+            "does still has to be `return <that variable>`.",
+        )
+    return out
 
 
 def set_expert_weights(e, j=0):

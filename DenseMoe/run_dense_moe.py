@@ -83,21 +83,21 @@ print("\nmanual trace == moe(x)  ok")
 
 
 # -------------------------------------------------------- 2. hand-recompute
-hdr("2. the broadcast is just a per-token loop (no magic)")
+hdr("2. three spellings, one function")
 
-slow = torch.zeros_like(x)
-for b in range(B):
-    for t in range(T):
-        h = x[b, t]                                  # (d,)
-        gw = F.softmax(moe.gate(h), dim=-1)          # (N,)
-        acc = torch.zeros(d)
-        for j, e in enumerate(moe.experts):
-            acc = acc + gw[j] * e(h)                 # scalar * (d,)
-        slow[b, t] = acc
+# forward_loop is the naive triple loop; forward_einsum replaces the broadcast
+# with 'btn,btnd->btd'. Both live in common.py next to forward().
+slow = moe.forward_loop(x)
+eins = moe.forward_einsum(x)
 
 print("max |vectorised - python loop| =", (slow - y).abs().max().item())
+print("max |vectorised - einsum|      =", (eins - y).abs().max().item())
 assert torch.allclose(slow, y, atol=1e-5)
+assert torch.allclose(eins, y, atol=1e-5)
 print("so   y[b,t] = sum_j  softmax(W_g h)[j] * E_j(h)   ok")
+print("\nThe loop is the trustworthy one: inside it every tensor is 1-D or a")
+print("scalar, so there is no axis to choose and no broadcast to line up -")
+print("neither bug the vectorised version can hide is expressible there.")
 print("\nNote the gate is applied PER TOKEN, not per sequence: routing is a")
 print("token-level decision, which is why the N axis sits next to T.")
 
@@ -133,9 +133,12 @@ tokens = B * T
 p_total = sum(p.numel() for p in moe.parameters())
 p_expert = sum(p.numel() for p in moe.experts.parameters())
 
+total = moe.macs_per_token()                # derived by the model itself
+assert total == mac_gate + N * mac_expert, "macs_per_token disagrees with the breakdown"
+
 print(f"per token: gate     {mac_gate:>6} MACs")
 print(f"           expert   {mac_expert:>6} MACs each  x {N} experts = {N * mac_expert}")
-print(f"           total    {mac_gate + N * mac_expert:>6} MACs")
+print(f"           total    {total:>6} MACs   (moe.macs_per_token())")
 print(f"\nparams: {p_total:,} total, {p_expert:,} in experts "
       f"({100 * p_expert / p_total:.0f}%)")
 print(f"ACTIVE params per token: {p_total:,}  ->  {100 * p_total / p_total:.0f}% of the model")
@@ -143,8 +146,9 @@ print(f"ACTIVE params per token: {p_total:,}  ->  {100 * p_total / p_total:.0f}%
 print("\nScaling N scales memory AND compute together, linearly:")
 print(f"  {'N':>4} {'params':>10} {'MACs/token':>12}")
 for n in (N, 8, 64, 512):
-    pn = n * (2 * d * d_ff) + d * n
-    print(f"  {n:>4} {pn:>10,} {d * n + n * mac_expert:>12,}")
+    mn = DenseMoE(d, d_ff, n)               # measured params vs derived MACs
+    pn = sum(p.numel() for p in mn.parameters())
+    print(f"  {n:>4} {pn:>10,} {mn.macs_per_token():>12,}")
 
 print("\nThat is the whole problem. The appeal of MoE is 'more parameters without")
 print("more compute per token', and dense delivers exactly none of it - N x the")

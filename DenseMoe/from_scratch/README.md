@@ -13,10 +13,11 @@ one that isn't done, so you always know what's next.
 
 ## The rule that makes this worth doing
 
-`../common.py` is the finished implementation. **Don't open it until you've
-passed stage 6.** If you read it first you'll write it from memory in ten
-minutes, pass everything, and learn nothing. The whole value here is in getting
-stage 4 wrong and working out why.
+`../common.py` is the finished implementation, and it now carries `forward_loop`,
+`forward_einsum` and `macs_per_token` too — so it is the answer key for every
+stage through 8. **Don't open it until you've passed stage 8.** If you read it
+first you'll write it from memory in ten minutes, pass everything, and learn
+nothing. The whole value here is in getting stage 4 wrong and working out why.
 
 ## Stages
 
@@ -64,8 +65,11 @@ MOE_IMPL=scratch python DenseMoe/run_dense_moe.py
 ```
 
 Same script that runs the reference (`MOE_IMPL` defaults to `common`), now
-driven by your code: dim-by-dim flow, a loop-vs-vectorised equality check, the
-convex hull property, the cost table, and a 400-step fit where the gate
-discovers a token split nobody told it about.
+driven by your code: dim-by-dim flow, a loop-vs-vectorised-vs-einsum equality
+check, the convex hull property, the cost table, and a 400-step fit where the
+gate discovers a token split nobody told it about.
+
+Note it calls `forward_loop`, `forward_einsum` and `macs_per_token` directly, so
+it needs stages 6-8 finished. Until then, use `check.py`.
 
 Then read `../common.py` and diff it against what you wrote.
