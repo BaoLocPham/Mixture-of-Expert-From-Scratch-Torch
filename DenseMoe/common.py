@@ -127,3 +127,84 @@ class DenseMoE(nn.Module):
         """
         per_expert = 2 * self.d_model * self.d_ff
         return self.d_model * self.n_experts + self.n_experts * per_expert
+
+
+class BatchedDenseMoE(nn.Module):
+    """The same math as DenseMoE, with no ModuleList and no loop over experts.
+
+    DenseMoE holds N separate Expert modules and calls them one at a time. That
+    is readable, and it is not how MoE is actually computed: N independent
+    nn.Linear calls are N separate kernel launches that the GPU cannot fuse, and
+    each one is too small to saturate the device on its own.
+
+    The fix is a layout change. Instead of N modules holding (d, d_ff) matrices,
+    hold ONE stacked parameter with the expert index as a leading axis:
+
+        W1: (N, d_model, d_ff)
+        W2: (N, d_ff, d_model)
+
+    Now every expert is a slice of one tensor, and all N run in a single batched
+    contraction. Same arithmetic, same MAC count, same numbers out - only the
+    memory layout and the number of kernel launches change. This is the shape
+    every real MoE implementation is built on, and it is also what makes sparse
+    routing implementable: once the experts live in one indexed tensor, "run
+    expert j on token i" becomes a gather rather than a branch.
+    """
+
+    def __init__(self, d_model, d_ff, n_experts):
+        super().__init__()
+        self.d_model, self.d_ff, self.n_experts = d_model, d_ff, n_experts
+        self.gate = nn.Linear(d_model, n_experts, bias=False)
+        self.W1 = nn.Parameter(torch.empty(n_experts, d_model, d_ff))
+        self.W2 = nn.Parameter(torch.empty(n_experts, d_ff, d_model))
+        nn.init.normal_(self.W1, std=d_model ** -0.5)
+        nn.init.normal_(self.W2, std=d_ff ** -0.5)
+
+    @torch.no_grad()
+    def copy_from(self, dense):
+        """Load weights from a DenseMoE so the two are numerically comparable."""
+        self.gate.weight.copy_(dense.gate.weight)
+        for j, e in enumerate(dense.experts):
+            # nn.Linear stores (out, in); the stacked form wants (in, out) per
+            # expert, so that x can multiply it directly with no transpose.
+            self.W1[j].copy_(e.w1.weight.t())
+            self.W2[j].copy_(e.w2.weight.t())
+        return self
+
+    def forward(self, x):
+        """(B, T, d) -> (B, T, d), every expert computed in one batched op.
+
+        Read the subscripts by asking which letter is summed - the one on both
+        inputs but not the output:
+
+            'btd,ndf->btnf'   d is summed (the contraction), n is broadcast out
+                              (B,T,d) x (N,d,d_ff) -> (B,T,N,d_ff)
+                              i.e. every token through every expert's w1 at once
+
+            'btnf,nfd->btnd'  f (= d_ff) is summed, n now matches on both sides
+                              (B,T,N,d_ff) x (N,d_ff,d) -> (B,T,N,d)
+
+        Note how n behaves differently in the two. In the first it appears only
+        on the right, and is carried into the output: each token is broadcast to
+        all N experts. In the second it appears on both inputs *and* the output,
+        which makes it a batch index rather than a contraction - expert j's
+        hidden state only ever meets expert j's w2. Summing n there instead
+        ('btnf,nfd->btd') would merge the experts, but the downstream shapes
+        reject it, so that mistake fails loudly rather than corrupting quietly.
+        """
+        h = torch.einsum('btd,ndf->btnf', x, self.W1)           # (B, T, N, d_ff)
+        outs = torch.einsum('btnf,nfd->btnd', F.silu(h), self.W2)  # (B, T, N, d)
+
+        w = F.softmax(self.gate(x), dim=-1)                     # (B, T, N)
+        return (w.unsqueeze(-1) * outs).sum(dim=-2)             # (B, T, d)
+
+    def macs_per_token(self):
+        """Identical to DenseMoE's - batching is a layout win, not a FLOP win.
+
+        Worth stating explicitly: this class does not make the model cheaper. It
+        makes the same work run in fewer, larger kernels. The parameter count and
+        the MAC count are unchanged, so the dense bottleneck is exactly as bad.
+        Only sparsity moves that number.
+        """
+        per_expert = 2 * self.d_model * self.d_ff
+        return self.d_model * self.n_experts + self.n_experts * per_expert

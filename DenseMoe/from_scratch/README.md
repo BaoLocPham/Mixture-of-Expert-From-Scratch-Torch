@@ -14,8 +14,8 @@ one that isn't done, so you always know what's next.
 ## The rule that makes this worth doing
 
 `../common.py` is the finished implementation, and it now carries `forward_loop`,
-`forward_einsum` and `macs_per_token` too — so it is the answer key for every
-stage through 8. **Don't open it until you've passed stage 8.** If you read it
+`forward_einsum`, `macs_per_token` and `BatchedDenseMoE` too — so it is the
+answer key for every stage. **Don't open it until you're done.** If you read it
 first you'll write it from memory in ten minutes, pass everything, and learn
 nothing. The whole value here is in getting stage 4 wrong and working out why.
 
