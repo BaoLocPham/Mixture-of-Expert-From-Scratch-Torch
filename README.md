@@ -1,5 +1,8 @@
 # Mixture of Experts, from scratch
 
+I have to admit I don't know any of this yet, so this repo is how I'm learning
+it from scratch.
+
 Small, self-contained PyTorch implementations of MoE, each one built up from
 nothing and then taken apart numerically.
 
@@ -56,6 +59,7 @@ Each track in this repo is built the same way:
 PyTorch is the only dependency. Everything runs on CPU in seconds.
 
 ```bash
+python DenseMoe/steps_dense_moe.py          # 3 tokens, 3 experts, every number printed
 python DenseMoe/run_dense_moe.py            # dense MoE, dissected
 python DenseMoe/from_scratch/check.py       # build it yourself, graded
 
@@ -112,7 +116,9 @@ fighting the language-modelling objective.
 .
 ├── DenseMoe/
 │   ├── common.py               reference implementation
+│   ├── steps_dense_moe.py      3 tokens, 3 experts, every intermediate printed
 │   ├── run_dense_moe.py        runnable walkthrough
+│   ├── diagrams.py             SVG sources for the notes
 │   └── from_scratch/
 │       ├── README.md           the exercise brief
 │       ├── dense_moe.py        stubs to fill in
