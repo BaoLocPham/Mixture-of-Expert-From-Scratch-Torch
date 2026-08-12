@@ -43,7 +43,9 @@ Each track in this repo is built the same way:
    of individual tensor axes.
 2. **A dissector** (`run_*_moe.py`) — runs the reference and prints the
    things you'd otherwise take on faith: intermediate shapes, a naive loop
-   reproducing the vectorised version, cost accounting, a small fit.
+   reproducing the vectorised version, cost accounting, a small fit. Where a
+   mechanism is easier to *see* than to measure, a `steps_*.py` companion
+   shrinks it to a handful of hand-written rows and prints every intermediate.
 3. **A from-scratch exercise** (`from_scratch/`) — the same layer as stubs, with
    a grader that checks each stage and diagnoses the specific mistake without
    giving up the answer. Rebuilding it is the point; the reference is there to
@@ -57,6 +59,7 @@ PyTorch is the only dependency. Everything runs on CPU in seconds.
 python DenseMoe/run_dense_moe.py            # dense MoE, dissected
 python DenseMoe/from_scratch/check.py       # build it yourself, graded
 
+python SparseMoe/steps_sparse_moe.py        # the same layer at S=6, every number printed
 python SparseMoe/run_sparse_moe.py          # top-k routing + dispatch, dissected
 python SparseMoe/from_scratch/check.py      # build that yourself too
 
@@ -116,7 +119,9 @@ fighting the language-modelling objective.
 │       └── check.py            staged grader
 └── SparseMoe/
     ├── common.py               MaskedSparseMoE (the trap) + SparseMoE (dispatch)
+    ├── steps_sparse_moe.py     6 rows, 3 experts, every intermediate printed
     ├── run_sparse_moe.py       runnable walkthrough
+    ├── diagrams.py             SVG sources for the notes
     └── from_scratch/
         ├── README.md
         ├── sparse_moe.py
