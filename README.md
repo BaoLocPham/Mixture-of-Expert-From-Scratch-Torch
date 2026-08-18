@@ -28,6 +28,7 @@ The aim is to get close enough to the mechanism to have opinions about it.
 |---|---|
 | `DenseMoe/` | The dense mixture: every expert on every token. Flow, dims, and why it can't scale. |
 | `SparseMoe/` | Top-k routing and real token dispatch: what it saves, what it costs, what it breaks. |
+| `LLM/` | The model the layer plugs into: a decoder-only transformer, built up part by part, with the FFN slot switchable between one network and a routed mixture. |
 
 Dense first, deliberately. It's the version where nothing is hidden: no discrete
 choice, no dropped tokens, no balancing loss, no dead experts. Everything that
@@ -37,6 +38,26 @@ sparsity buys, and at what price.
 
 Sparse then arrives as a strict generalisation: at `k=N` it reproduces the dense
 layer exactly, and the dissector checks that rather than asserting it.
+
+`LLM/` closes the loop. An MoE layer is not a model, and studying it in
+isolation quietly assumes the surrounding architecture is a detail. So the same
+transformer is built from the norm up — RMSNorm, RoPE, causal attention with
+grouped query heads and a KV cache, pre-norm residuals, tied embeddings — and
+the FFN slot takes either a plain feed-forward network or the routed one. Every
+"with MoE vs without" number in that track is a one-word diff on the same model,
+same seed, same batches.
+
+## Notation
+
+The `LLM/` track follows one symbol table throughout — `d`, `d_h`, `d_ff`, `N`,
+`k`, `L`, `n_h`, `n_kv`, `m` and `n` for query and key position, `θ_i` for the
+rotation rate of channel pair `i`, `α` for the balancing coefficient,
+`P_tot`/`P_act` for total and active parameters. Every equation it implements is
+cited by number (E1–E43) in the docstring next to it, so a printed row and the
+line of maths it came from can be read side by side. Where the two MoE tracks
+differ — their `Expert` is the older two-matrix FFN, while `LLM/` uses the
+three-matrix SwiGLU (E18) that current models actually use — the code says so at
+the point of difference rather than leaving it to be discovered.
 
 ## The shape of a module
 
@@ -67,7 +88,12 @@ python SparseMoe/steps_sparse_moe.py        # the same layer at S=6, every numbe
 python SparseMoe/run_sparse_moe.py          # top-k routing + dispatch, dissected
 python SparseMoe/from_scratch/check.py      # build that yourself too
 
-MOE_IMPL=scratch python DenseMoe/run_dense_moe.py   # dissect your own version
+python LLM/steps_llm.py                     # 4 tokens through one layer, printed
+python LLM/run_llm.py                       # the whole model, dissected (~1 min: it trains)
+python LLM/from_scratch/check.py            # build the transformer yourself, graded
+
+MOE_IMPL=scratch python DenseMoe/run_dense_moe.py   # dissect your own MoE
+LLM_IMPL=scratch python LLM/run_llm.py              # dissect your own transformer
 ```
 
 ## What the numbers have settled so far
@@ -101,9 +127,44 @@ MOE_IMPL=scratch python DenseMoe/run_dense_moe.py   # dissect your own version
   constant 1.0, so the router's gradient is **exactly zero** and it never learns.
   Switch multiplies by the un-normalised probability precisely to avoid this.
 
+- **A transformer is two alternating jobs, and only one of them is MoE's
+  business.** Attention mixes across positions and computes almost nothing per
+  token; the FFN computes everything per token and cannot see another token. MoE
+  makes the second one cheap per parameter and does not touch the first — at
+  `T=4096` the score/value matmuls cost 1,572,864 MACs/token against 73,728 for
+  the FFN, so a routed FFN changes nothing about long-context cost.
+- **Swapping in MoE moves exactly one number.** Same model, `ffn="moe"` with
+  `N=8, k=1`: 5.13× the parameters at 1.01× the MACs per token, a `P_tot/P_act`
+  of 5.07 where every dense model ever built sits at 1.00.
+- **And on a task with no use for capacity, MoE loses — measurably.** Three
+  seeds each, matched compute: dense reaches 0.0078 mean cross-entropy on the
+  part of the task that carries signal, routing with `α=0` reaches 0.0130, and
+  routing with `α=0.01` reaches 0.0256. The ranking holds on every seed. Two
+  separate costs, cleanly separated by those three configs: the discrete choice
+  itself, and then the balancing term, which adds an objective the language
+  model never asked for and is paid for out of the same weights. That second one
+  is the entire motivation for aux-loss-free balancing.
+- **What the balancing loss buys, in the only place it is visible.** With it,
+  the busiest expert sees 2.84× the quietest and no expert sits idle in any
+  layer. Without it, 7.01×, and (layer, expert) slots start going completely
+  unused — which means those experts stop receiving gradient at all, and the
+  imbalance feeds itself.
+- **RoPE gives relative position for free.** Rotating `q` by `m` and `k` by `n`
+  leaves `q·k` depending only on `n - m`, verified to 1.6e-06 across absolute
+  offsets — zero learned position parameters, and the only thing bounding context
+  length is the size of a precomputed table.
+- **The KV cache is exact, and it is not optional.** Feeding a sequence one token
+  at a time agrees with one full pass to 2.4e-07, and generating 64 tokens after a
+  128-token prompt is ~2.6× faster — a gap that widens with the prefix, because
+  the work it removes is quadratic. Grouped query attention halves what that
+  cache holds (384 → 192 floats per token here) without touching a single
+  query head.
+
 ## Next
 
-The parts that make sparse routing actually fast, and actually stable:
+Now that there is a model to put them in: capacity factors and token dropping,
+measured on a real loss rather than on a routing table; the parts that make
+sparse routing actually fast, and actually stable:
 capacity factors and token dropping; grouped/block-sparse GEMM, since the naive
 dispatch loop spends the right FLOPs in badly-shaped matmuls and can lose to
 dense at small `N`; expert parallelism and its two all-to-alls; and the
@@ -123,15 +184,25 @@ fighting the language-modelling objective.
 │       ├── README.md           the exercise brief
 │       ├── dense_moe.py        stubs to fill in
 │       └── check.py            staged grader
-└── SparseMoe/
-    ├── common.py               MaskedSparseMoE (the trap) + SparseMoE (dispatch)
-    ├── steps_sparse_moe.py     6 rows, 3 experts, every intermediate printed
-    ├── run_sparse_moe.py       runnable walkthrough
-    ├── diagrams.py             SVG sources for the notes
+├── SparseMoe/
+│   ├── common.py               MaskedSparseMoE (the trap) + SparseMoE (dispatch)
+│   ├── steps_sparse_moe.py     6 rows, 3 experts, every intermediate printed
+│   ├── run_sparse_moe.py       runnable walkthrough
+│   ├── diagrams.py             SVG sources for the notes
+│   └── from_scratch/
+│       ├── README.md
+│       ├── sparse_moe.py
+│       └── check.py
+└── LLM/
+    ├── common.py               RMSNorm, RoPE, GQA attention, blocks, TinyLLM
+    ├── steps_llm.py            4 tokens through one layer, every intermediate printed
+    ├── run_llm.py              the whole model, dissected - dense against MoE
+    ├── diagrams.py             SVG sources for the RoPE notes
     └── from_scratch/
-        ├── README.md
-        ├── sparse_moe.py
-        └── check.py
+        ├── README.md           the exercise brief
+        ├── llm.py              stubs to fill in
+        ├── check.py            staged grader
+        └── expected.py         the numbers it checks against
 ```
 
 ## License

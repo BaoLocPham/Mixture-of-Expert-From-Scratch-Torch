@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# generated diagram output (regenerate with python LLM/diagrams.py)
+LLM/diagrams/
