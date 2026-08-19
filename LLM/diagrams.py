@@ -880,6 +880,212 @@ def split_transpose_diagram():
                 "Token-major head blocks regrouped into head-major matrices.", b)
 
 
+# --------------------------------------------- 56. the two channel conventions
+CONV_DH = 8
+CONV_Q = [0.6, -0.2, 0.9, 0.4, -0.7, 0.1, 0.3, -0.5]
+CONV_COS3 = [-0.9900, 0.9553, 0.9996, 1.0000]      # rope_tables(8, 16), row m = 3
+CONV_SIN3 = [0.1411, 0.2955, 0.0300, 0.0030]
+CONV_INTER = [-0.5658, 0.2827, 0.7416, 0.6481, -0.7027, 0.0790, 0.3015, -0.4991]
+CONV_HALF = [-0.4952, -0.2206, 0.8906, 0.4015, 0.7777, 0.0364, 0.3269, -0.4988]
+CONV_ROTH = [0.7, -0.1, -0.3, 0.5, 0.6, -0.2, 0.9, 0.4]
+CONV_PERM = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def arc(x1, x2, y, height, colour, label, dash=False):
+    """A shallow arc above the row, joining two channels that share an angle."""
+    mid = (x1 + x2) / 2
+    d = ' stroke-dasharray="4 3"' if dash else ""
+    g = (f'<path d="M{x1} {y} Q{mid} {y - height} {x2} {y}" fill="none" '
+         f'stroke="{colour}" stroke-width="1.4" stroke-linecap="round"{d}/>')
+    return g + txt(mid, y - height * 0.62, label, 9.5, colour, "middle")
+
+
+def conventions_diagram():
+    """Same channels, same angles, two different ideas of which two are a pair."""
+    n = CONV_DH
+    CW, G = 56, 4
+    x0 = (680 - (n * (CW + G) - G)) / 2
+
+    b = txt(340, 24, "Two channel conventions, one rotation", 13, PRI, "middle", "500")
+    b += txt(340, 44, f"one head, d_h = {n}, so {n // 2} pairs and "
+             f"{n // 2} angles \u2014 the question is only which two channels share one",
+             11, SEC, "middle")
+
+    def row(y, pairs, title, sub, colour_of, lift=36):
+        g = txt(x0, y - lift - 16, title, 12, PRI, "start", "500")
+        g += txt(x0, y - lift, sub, 9.5, SEC, "start")
+        for j in range(n):
+            g += vcell(x0 + j * (CW + G), y, CW, 26, colour_of(j), f"ch {j}", size=9.5)
+        for i, (a, c) in enumerate(pairs):
+            xa = x0 + a * (CW + G) + CW / 2
+            xc = x0 + c * (CW + G) + CW / 2
+            h = 18 + 12 * abs(c - a)
+            g += arc(xa, xc, y - 2, h, RAMP[PAIR_RAMP[i]][1], f"\u03b8{i}")
+        return g
+
+    y1 = 148
+    b += row(y1, [(2 * i, 2 * i + 1) for i in range(n // 2)],
+             "interleaved \u2014 \u201cGPT-J style\u201d",
+             "pairs (0,1), (2,3), \u2026 \u2014 partners are adjacent. "
+             "LLM/common.py and rope.py stage 2.",
+             lambda j: PAIR_RAMP[j // 2])
+
+    y2 = 336
+    b += row(y2, [(i, i + n // 2) for i in range(n // 2)],
+             "split-half \u2014 \u201cGPT-NeoX style\u201d, the rotate_half form",
+             "pairs (0,4), (1,5), \u2026 \u2014 partners are half a head apart. "
+             "HuggingFace LLaMA, and rope.py stage 3.",
+             lambda j: PAIR_RAMP[j % (n // 2)], lift=80)
+
+    yy = y2 + 52
+    b += txt(340, yy, "Colour is the angle. Both rows use the SAME four thetas and "
+             "the same tables;", 12, PRI, "middle", "500")
+    b += txt(340, yy + 20, "they disagree only about which two channels get turned "
+             "together.", 11, SEC, "middle")
+    b += txt(340, yy + 46, "Neither is more correct. A model trained under one is "
+             "simply a model whose", 11, SEC, "middle")
+    b += txt(340, yy + 64, "W_Q and W_K columns are laid out for that pairing \u2014 "
+             "which is why converting a", 11, SEC, "middle")
+    b += txt(340, yy + 82, "checkpoint between them is a permutation of those two "
+             "matrices, and nothing more.", 11, SEC, "middle")
+    return wrap(680, yy + 110, "The two RoPE channel conventions",
+                "Interleaved and split-half pairings of the same eight channels.", b)
+
+
+# ------------------------------------------------------------ 57. rotate_half
+def rotate_half_diagram():
+    """What rotate_half does, and why one line then suffices."""
+    n = CONV_DH
+    CW, G = 56, 4
+    x0 = (680 - (n * (CW + G) - G)) / 2
+
+    b = txt(340, 24, "rotate_half: a quarter turn, done by moving numbers",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, "every value in these rows is printed by "
+             "LLM/from_scratch/check_rope.py", 11, SEC, "middle")
+
+    def vals(y, data, colour_of, label):
+        g = txt(x0 - 10, y + 13, label, 10, PRI, "end", "500")
+        for j, v in enumerate(data):
+            g += vcell(x0 + j * (CW + G), y, CW, 26, colour_of(j), f"{v:+.2f}", size=9.5)
+        return g
+
+    b += txt(x0, 82, "the halves, and what happens to them", 10, SEC, "start")
+    y1 = 98
+    b += vals(y1, CONV_Q, lambda j: "teal" if j < n // 2 else "coral", "x")
+    b += arrow(340, y1 + 30, 340, y1 + 52)
+    b += txt(352, y1 + 41, "rotate_half", 10.5, PRI, "start", "500")
+    y2 = y1 + 60
+    b += vals(y2, CONV_ROTH, lambda j: "coral" if j < n // 2 else "teal",
+              "rotate_half(x)")
+    b += txt(340, y2 + 42, "second half moves to the front and changes sign; first "
+             "half follows unchanged", 10, SEC, "middle")
+    b += txt(340, y2 + 60, "\u2014 do it twice and you get \u2212x exactly "
+             "(max diff 0.0), which is what makes it a turn", 10, SEC, "middle")
+
+    y3 = y2 + 96
+    b += txt(340, y3, "Why that is enough", 12, PRI, "middle", "500")
+    b += txt(340, y3 + 22, "E7 on a pair (a, b) is  (a\u00b7cos \u2212 b\u00b7sin,  "
+             "a\u00b7sin + b\u00b7cos).", 11, SEC, "middle")
+    b += txt(340, y3 + 40, "The vector (\u2212b, a) IS the pair turned a quarter "
+             "turn, so the whole thing collapses to", 11, SEC, "middle")
+
+    y4 = y3 + 66
+    b += vcell(150, y4, 380, 30, "purple",
+               "out = x \u00b7 cos\u0303  +  rotate_half(x) \u00b7 sin\u0303",
+               size=12, weight="500")
+    b += txt(340, y4 + 46, "with cos\u0303 = cat([cos, cos]) \u2014 the tables are "
+             f"{n // 2} wide and a channel needs its own entry,", 10, SEC, "middle")
+    b += txt(340, y4 + 64, f"so channel j and channel j+{n // 2} end up sharing "
+             "\u03b8_j. That duplication IS the pairing.", 10, SEC, "middle")
+
+    y5 = y4 + 92
+    a0, b0 = CONV_Q[0], CONV_Q[n // 2]
+    c0, s0 = CONV_COS3[0], CONV_SIN3[0]
+    b += txt(340, y5, "One pair, by hand \u2014 channels 0 and 4 at m = 3, "
+             f"\u03b8\u2080 = 1.0", 11, PRI, "middle", "500")
+    lines = [
+        f"a = {a0:+.2f} (ch 0)   \u00b7   b = {b0:+.2f} (ch 4)   \u00b7   "
+        f"cos = {c0:+.4f}   \u00b7   sin = {s0:+.4f}",
+        f"ch 0  =  a\u00b7cos \u2212 b\u00b7sin  =  {a0 * c0:+.4f} \u2212 "
+        f"({b0 * s0:+.4f})  =  {a0 * c0 - b0 * s0:+.4f}",
+        f"ch 4  =  a\u00b7sin + b\u00b7cos  =  {a0 * s0:+.4f} + "
+        f"({b0 * c0:+.4f})  =  {a0 * s0 + b0 * c0:+.4f}",
+    ]
+    for i, ln in enumerate(lines):
+        b += txt(340, y5 + 24 + i * 18, ln, 10, SEC, "middle")
+    b += txt(340, y5 + 84, "and those are exactly entries 0 and 4 of the split-half "
+             f"output, {CONV_HALF[0]:+.4f} and {CONV_HALF[n // 2]:+.4f}.",
+             10.5, PRI, "middle", "500")
+    return wrap(680, y5 + 112, "rotate_half",
+                "The quarter turn that lets the split-half rotation fit on one "
+                "line.", b)
+
+
+# ------------------------------------------- 58. the permutation, and mixing them
+def convention_swap_diagram():
+    """The two are one function on a permuted channel order - unless you mix them."""
+    n = CONV_DH
+    CW, G = 56, 4
+    x0 = (680 - (n * (CW + G) - G)) / 2
+
+    b = txt(340, 24, "The same function, and the one way to get it wrong",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, "x[perm] gathers each split-half partner next to its own \u2014 "
+             "then it IS the interleaved case", 11, SEC, "middle")
+
+    y1 = 92
+    b += txt(x0 - 10, y1 + 13, "perm", 10, PRI, "end", "500")
+    for j, src in enumerate(CONV_PERM):
+        b += vcell(x0 + j * (CW + G), y1, CW, 26, PAIR_RAMP[j // 2], f"ch {src}",
+                   size=9.5)
+    for i in range(n // 2):
+        xa = x0 + (2 * i) * (CW + G) + CW / 2
+        xc = x0 + (2 * i + 1) * (CW + G) + CW / 2
+        b += arc(xa, xc, y1 - 2, 30, RAMP[PAIR_RAMP[i]][1], f"\u03b8{i}")
+
+    yy = y1 + 46
+    b += vcell(96, yy, 488, 28, "purple",
+               "apply_rope_half(x)  ==  apply_rope(x[perm])[inv]", size=11.5,
+               weight="500")
+    b += txt(340, yy + 44, "Checked on a (2, 3, 4, 8) tensor: max difference "
+             "0.00e+00. Not close \u2014 equal.", 11, PRI, "middle", "500")
+    b += txt(340, yy + 62, "Either convention on its own is exactly E7, and E8 holds "
+             "for both.", 11, SEC, "middle")
+
+    y2 = yy + 96
+    b += txt(340, y2, "What happens if q and k disagree", 12, PRI, "middle", "500")
+    rows = [("q and k both interleaved", "+0.139683", "1.8e-07", "teal"),
+            ("q and k both split-half", "+0.614924", "1.8e-07", "teal"),
+            ("q interleaved, k split-half", "varies", "1.7e+00", "coral")]
+    hy = y2 + 22
+    b += vcell(96, hy, 250, 24, "gray", "one fixed (q, k), three gaps of 3", size=9.5)
+    b += vcell(348, hy, 118, 24, "gray", "q\u00b7k", size=9.5)
+    b += vcell(468, hy, 116, 24, "gray", "spread", size=9.5)
+    for i, (lab, val, spread, ramp) in enumerate(rows):
+        ry = hy + 27 + i * 27
+        b += vcell(96, ry, 250, 24, ramp, lab, size=9.5)
+        b += vcell(348, ry, 118, 24, ramp, val, size=9.5)
+        b += vcell(468, ry, 116, 24, ramp, spread, size=9.5)
+
+    y3 = hy + 27 + len(rows) * 27 + 20
+    b += txt(340, y3, "E8 says three pairs at the same gap must give the same score. "
+             "Mixed, they", 11, PRI, "middle", "500")
+    b += txt(340, y3 + 18, "differ by 1.7 \u2014 seven orders of magnitude past float "
+             "noise. Nothing raises:", 11, SEC, "middle")
+    b += txt(340, y3 + 36, "same shapes, same dtype, a model that trains and has "
+             "simply lost relative position.", 11, SEC, "middle")
+    b += txt(340, y3 + 62, "This is also the checkpoint story. HuggingFace implements "
+             "the split-half form and", 11, SEC, "middle")
+    b += txt(340, y3 + 80, "permutes W_Q and W_K at conversion "
+             "(convert_llama_weights_to_hf.py) so Meta's", 11, SEC, "middle")
+    b += txt(340, y3 + 98, "interleaved weights come out agreeing with it.",
+             11, SEC, "middle")
+    return wrap(680, y3 + 126, "Mixing the conventions",
+                "The permutation that makes them equal, and what happens when q and "
+                "k disagree.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -891,6 +1097,9 @@ DIAGRAMS = {
     "50_attention_shapes.svg": attention_shapes_diagram,
     "54_split_view.svg": split_view_diagram,
     "55_split_transpose.svg": split_transpose_diagram,
+    "56_rope_conventions.svg": conventions_diagram,
+    "57_rotate_half.svg": rotate_half_diagram,
+    "58_convention_swap.svg": convention_swap_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
