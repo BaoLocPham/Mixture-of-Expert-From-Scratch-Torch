@@ -1282,6 +1282,102 @@ def scaling_family_diagram():
                 b)
 
 
+# ------------------------------------------------------- 63. cos[None, None]
+NN_B, NN_H, NN_T, NN_P = 2, 4, 12, 4        # d_h = 8, so d_h/2 = 4
+
+
+def newaxis_diagram():
+    """What [None, None] does to the tables, and why the line has it."""
+    b = txt(340, 24, "cos[None, None]: giving the table the axes x already has",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, "None in an index is torch.newaxis \u2014 it inserts an axis "
+             "of length 1", 11, SEC, "middle")
+
+    # --- the shape ladder, right-aligned the way broadcasting reads it ------
+    CW, G = 104, 6
+    x0 = 236
+    heads = ["batch", "head", "position", "pair"]
+    for j, h in enumerate(heads):
+        b += txt(x0 + j * (CW + G) + CW / 2, 78, h, 9.5, SEC, "middle")
+
+    rows = [
+        ("x1 = x[..., 0::2]", [f"B={NN_B}", f"H={NN_H}", f"T={NN_T}",
+                               f"d_h/2={NN_P}"], ["purple"] * 4, "the head, split"),
+        ("cos", [None, None, f"T={NN_T}", f"d_h/2={NN_P}"],
+         [None, None, "gray", "gray"], "two axes short"),
+        ("cos[None, None]", ["1", "1", f"T={NN_T}", f"d_h/2={NN_P}"],
+         ["coral", "coral", "gray", "gray"], "the two Nones"),
+        ("x1 * cos[None, None]", [f"{NN_B}", f"{NN_H}", f"{NN_T}", f"{NN_P}"],
+         ["teal"] * 4, "each 1 stretched"),
+    ]
+    y = 96
+    for name, cells, ramps, note in rows:
+        b += txt(x0 - 12, y + 13, name, 10, PRI, "end", "500")
+        for j, (lab, ramp) in enumerate(zip(cells, ramps)):
+            xx = x0 + j * (CW + G)
+            if lab is None:
+                b += (f'<rect x="{xx}" y="{y}" width="{CW}" height="26" rx="3" '
+                      f'fill="none" stroke="{SEC}" stroke-width="0.5" '
+                      f'stroke-dasharray="3 3" opacity="0.5"/>')
+            else:
+                b += vcell(xx, y, CW, 26, ramp, lab, size=10)
+        y += 32
+
+    yy = y + 6
+    b += txt(340, yy, "Broadcasting reads shapes from the RIGHT. An axis of length "
+             "1 is reused for", 11, PRI, "middle", "500")
+    b += txt(340, yy + 18, "every index along it \u2014 so one table of angles serves "
+             "every head, and every", 11, SEC, "middle")
+    b += txt(340, yy + 36, "sequence in the batch. That is the claim the two Nones "
+             "are making.", 11, SEC, "middle")
+
+    # --- the picture: one table, reused across the (B, H) grid -------------
+    y2 = yy + 66
+    b += txt(340, y2, f"One (T, d_h/2) table \u2192 all {NN_B}\u00d7{NN_H} = "
+             f"{NN_B * NN_H} (batch, head) slices", 11.5, PRI, "middle", "500")
+    ty = y2 + 22
+    b += vcell(64, ty + 18, 116, 44, "gray", "cos", size=11, weight="500")
+    b += txt(122, ty + 74, f"({NN_T}, {NN_P})", 9, SEC, "middle")
+    b += arrow(186, ty + 40, 232, ty + 40)
+    CW2, CH2, G2 = 92, 26, 6
+    for r in range(NN_B):
+        for c in range(NN_H):
+            b += vcell(248 + c * (CW2 + G2), ty + r * (CH2 + G2), CW2, CH2,
+                       "gray", "cos", size=9, op=0.55)
+    b += txt(248, ty + NN_B * (CH2 + G2) + 8, f"b=0..{NN_B - 1}, "
+             f"h=0..{NN_H - 1} \u2014 the same numbers, not {NN_B * NN_H} copies",
+             9, SEC, "start")
+
+    y3 = ty + NN_B * (CH2 + G2) + 34
+    b += txt(340, y3, "Three things this is not", 12, PRI, "middle", "500")
+    facts = [
+        ("not a copy", "cos and cos[None, None] share storage \u2014 same "
+         "data_ptr, 256 bytes either way"),
+        ("not required", "x1 * cos gives the identical result: torch prepends "
+         "the 1s by itself"),
+        ("not a guard", "a mis-shaped (T,) table raises the same error with the "
+         "Nones as without"),
+    ]
+    for i, (name, note) in enumerate(facts):
+        yy3 = y3 + 22 + i * 30
+        b += vcell(56, yy3, 108, 24, PAIR_RAMP[i], name, size=9.5, weight="500")
+        b += txt(176, yy3 + 12, note, 9.5, SEC, "start")
+
+    y4 = y3 + 22 + len(facts) * 30 + 14
+    b += txt(340, y4, "So the brackets are documentation, and worth the two "
+             "characters:", 11.5, PRI, "middle", "500")
+    b += txt(340, y4 + 20, "they put the intended alignment on the line instead of "
+             "leaving it to a rule the", 11, SEC, "middle")
+    b += txt(340, y4 + 38, "reader has to remember. In a file where every bug is a "
+             "silent shape bug, saying", 11, SEC, "middle")
+    b += txt(340, y4 + 56, "which axes you meant is the point.", 11, SEC, "middle")
+    b += txt(340, y4 + 82, "cos[None, None]  ==  cos.unsqueeze(0).unsqueeze(0)  ==  "
+             "cos[None, None, :, :]", 10, RAMP["purple"][2], "middle", "500")
+    return wrap(680, y4 + 110, "cos[None, None]",
+                "Inserting two length-1 axes so one table of angles broadcasts "
+                "over batch and head.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1299,6 +1395,7 @@ DIAGRAMS = {
     "60_pi_positions.svg": pi_positions_diagram,
     "61_pi_tradeoff.svg": pi_tradeoff_diagram,
     "62_scaling_family.svg": scaling_family_diagram,
+    "63_newaxis.svg": newaxis_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
