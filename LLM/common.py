@@ -31,6 +31,11 @@ without MoE", E1-E43), so a line here can be read next to the line there:
 
 Row-vector convention throughout (x is (..., d) and the maths reads xW), which
 is what nn.Linear already does.
+
+Three functions here are reference only and are never called by the model:
+`rotate_half` and `apply_rope_half` (the split-half channel convention that
+HuggingFace uses) and `rope_tables_scaled` (Position Interpolation). They are
+the answers to stages 3 and 4 of LLM/from_scratch/rope.py.
 """
 
 from dataclasses import dataclass, field
@@ -200,10 +205,131 @@ def apply_rope(x, cos, sin):
     #    "split the head in half" layout that HuggingFace's LLaMA uses. That
     #    convention is equally valid - it just pairs channel j with channel
     #    j + d_h/2 instead of j with j+1, and the checkpoints permute W_Q and
-    #    W_K to match. What is NOT valid is mixing the two: rotate q one way
-    #    and k the other and E8 quietly stops holding, with no error anywhere.
+    #    W_K to match; `apply_rope_half` below is it, written out. What is NOT
+    #    valid is mixing the two: rotate q one way and k the other and E8
+    #    quietly stops holding, with no error anywhere.
     out = torch.stack([rot1, rot2], dim=-1)                     # (…, d_h/2, 2)
     return out.flatten(-2)                                      # (…, d_h)
+
+
+# ------------------------------------------------- rope: the other conventions
+# The model above uses `rope_tables` + `apply_rope` and nothing else. The three
+# functions below are reference implementations of the two variants every real
+# codebase has to deal with, kept here because they are the answers to stages 3
+# and 4 of LLM/from_scratch/rope.py. Nothing in this file calls them.
+
+
+def rotate_half(x):
+    r"""A quarter turn, for the split-half channel layout.
+
+    x: (..., d_h)  ->  (..., d_h)
+
+        [ a0 a1 a2 a3 | b0 b1 b2 b3 ]  ->  [ -b0 -b1 -b2 -b3 | a0 a1 a2 a3 ]
+
+    Why a function shaped like this exists. E7 on a pair (a, b) is
+
+        (a*cos - b*sin,  a*sin + b*cos)
+
+    which is the same as
+
+        (a, b) * cos  +  (-b, a) * sin
+
+    and (-b, a) is just (a, b) turned 90 degrees. So ANY rotation is "the
+    vector times cos, plus the vector-turned-a-quarter-turn times sin" - which
+    is e^(i.phi) = cos(phi) + i.sin(phi) written without complex numbers.
+
+    `rotate_half` is that quarter turn for a layout where a channel's partner
+    sits d_h/2 away instead of 1 - so both members of every pair live in the
+    same half of the vector, and one `cat` performs all d_h/2 quarter turns at
+    once. Applied twice it gives -x exactly, which is the cheapest test there
+    is that you have a rotation and not a shuffle.
+    """
+    h = x.shape[-1] // 2
+    return torch.cat([-x[..., h:], x[..., :h]], dim=-1)
+
+
+def apply_rope_half(x, cos, sin):
+    r"""E7 again, in the split-half ("GPT-NeoX"/HuggingFace) convention.
+
+    x: (B, H, T, d_h)   cos/sin: (T, d_h/2)   ->   (B, H, T, d_h)
+
+    Same tables, same angles, same rotation. The only difference from
+    `apply_rope` is which two channels count as a pair:
+
+        apply_rope       pairs (0,1), (2,3), (4,5), ...     partners adjacent
+        apply_rope_half  pairs (0,4), (1,5), (2,6), ...     partners d_h/2 apart
+
+    The `cat([cos, cos])` below is where that gets decided. The tables are
+    d_h/2 wide and this form needs one entry per CHANNEL, so they are
+    duplicated - and duplicating means channel j and channel j + d_h/2 read the
+    same theta_j. That one line IS the pairing, the way `x[..., 0::2]` is the
+    pairing in `apply_rope`.
+
+    The two are the same function on a permuted channel order:
+
+        perm = torch.arange(d_h).reshape(2, d_h // 2).t().reshape(-1)
+        inv  = torch.argsort(perm)
+        apply_rope_half(x, cos, sin) == apply_rope(x[..., perm], cos, sin)[..., inv]
+
+    exactly - max difference 0.0, not "close". Which is also the whole content
+    of the checkpoint story: HuggingFace implements this form, so
+    convert_llama_weights_to_hf.py bakes `perm` into the rows of W_Q and W_K
+    once, and Meta's interleaved-trained weights come out agreeing with it.
+
+    Either convention is fine on its own and E8 holds for both. Mixing them is
+    not: rotate q one way and k the other and three pairs at the same gap - which
+    must agree to ~1e-07 - come out 1.7 apart. Nothing raises. Same shapes, same
+    dtype, a model that trains and has simply lost relative position.
+    """
+    c = torch.cat([cos, cos], dim=-1)[None, None]               # (1, 1, T, d_h)
+    s = torch.cat([sin, sin], dim=-1)[None, None]
+    return x * c + rotate_half(x) * s
+
+
+def rope_tables_scaled(d_head, max_seq, base=10000.0, scale=1.0, device=None):
+    r"""Position Interpolation (Chen et al., 2023): `rope_tables` with the
+    positions divided by `scale`.
+
+    A model trained at 2k tokens has never handed pair 0 (theta = 1.0) an angle
+    above 2048 radians. Run it at 8k and that becomes 8192 - no error, cosine is
+    happy to be evaluated anywhere, but the weights have no training signal for
+    that region and quality falls off sharply.
+
+    PI's answer is to squeeze the position axis rather than extend it: position
+    m is rotated as if it were m/scale, so a `scale`x longer sequence lands
+    inside the range the model was trained on. Everything else is untouched -
+    same weights, same theta_i, same code path, no new parameters - which is why
+    it can be applied to an already-trained checkpoint.
+
+    The consequence, and the price, are the same measurement:
+
+        plain tables,  gap 1 token   ->  q.k = +0.150094
+        scaled by 4,   gap 4 tokens  ->  q.k = +0.150094      difference 0.0
+        plain tables,  gap 4 tokens  ->  q.k = -1.149394
+
+    Four tokens apart now produces exactly the score one token apart used to.
+    That is the gain (reach) and the loss (resolution) in one line: every
+    wavelength is multiplied by scale, the fast pairs included, so pair 0 goes
+    from a period of ~6.3 tokens to ~25.1 and the pair that separated adjacent
+    tokens now separates groups of four. Hence the fine-tuning PI needs.
+
+    The two methods that followed spend the same budget more carefully, and
+    neither is implemented here:
+
+      NTK-aware  raise the BASE instead, base * scale ** (d_h / (d_h - 2)).
+                 theta_i = base ** (-2i/d_h) has i = 0 in the exponent, so pair
+                 0 is base**0 = 1 whatever the base is - the fast pairs are left
+                 alone and the whole stretch lands on the slow ones.
+      YaRN       a per-pair ramp between interpolating and extrapolating, plus
+                 an attention temperature. 64k-128k on a fraction of PI's data.
+
+    scale = 1.0 reproduces `rope_tables` exactly.
+    """
+    two_i = torch.arange(0, d_head, 2, device=device).float()
+    theta = base ** (-two_i / d_head)
+    m = torch.arange(max_seq, device=device).float() / scale    # <- the method
+    ang = torch.outer(m, theta)                                 # (max_seq, d_h/2)
+    return ang.cos(), ang.sin()
 
 
 # --------------------------------------------------------------- attention

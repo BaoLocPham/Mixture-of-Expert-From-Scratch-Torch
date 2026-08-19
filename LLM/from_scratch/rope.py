@@ -25,9 +25,11 @@ Notation follows "The equations - with and without MoE" (E7, E8):
 E8 is the reason the whole thing exists, and stage 2's last check is the only
 one that actually tests it.
 
-`../common.py` is the finished version of stages 1 and 2. Opening it before you
-are done costs you the exercise. Stages 3 and 4 are not in it - they are
-checked against the code you wrote in stages 1 and 2, so those have to be right
+`../common.py` is the finished version of all four stages: `rotate_half`,
+`apply_rope_half` and `rope_tables_scaled` sit at the end of its RoPE section,
+reference-only and never called by the model. Opening it before you are done
+costs you the exercise. The grader does not read it either - stages 3 and 4 are
+checked against the code YOU wrote in stages 1 and 2, so those have to be right
 first.
 """
 
