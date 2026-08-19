@@ -127,6 +127,29 @@ print("\nThe split is a view, not a computation. 'Heads' are a reading of one")
 print("matrix: columns 0-1 are head 0, columns 2-3 are head 1. They never mix")
 print("again until o_proj, which is what makes them independent.")
 
+# _split, on its own 4-head example so the column layout is visible - this is
+# the picture the notes draw: n_h = 4, d_h = 4, one token, entries 0..15
+NH_, DH_ = 4, 4
+flat = torch.arange(NH_ * DH_).float()[None]                    # (T=1, 16)
+heads = flat.view(1, NH_, DH_).transpose(0, 1)                  # (n_h, T, dh)
+print(f"\n_split on one row of 0..{NH_ * DH_ - 1}, n_h={NH_}, d_h={DH_}:")
+for h in range(NH_):
+    print(f"  head {h}: {[int(u) for u in heads[h, 0]]}")
+print(f"  head h is exactly columns h*d_h : (h+1)*d_h - max diff "
+      f"{(heads[:, 0] - flat.view(NH_, DH_)).abs().max():.2e}")
+wrong = flat.view(1, DH_, NH_).transpose(1, 2)                  # d_h and n_h swapped
+print(f"  view(T, d_h, n_h) instead: head 0 = {[int(u) for u in wrong[0, 0]]}"
+      " - same shape, no error, a different model")
+
+# GQA: one kv head serves n_rep query heads, and the order matters
+NKV_ = 2
+tag = torch.arange(NKV_).float()[:, None]                       # tag each kv head
+print(f"\nGQA with n_h={NH_}, n_kv={NKV_} (n_rep={NH_ // NKV_}): the kv head each q head reads")
+print(f"  repeat_interleave: {[int(u) for u in tag.repeat_interleave(NH_ // NKV_, 0)[:, 0]]}"
+      "   <- floor(h / n_rep), which is what E11 says")
+print(f"  repeat:            {[int(u) for u in tag.repeat(NH_ // NKV_, 1)[:, 0]]}"
+      "   <- h mod n_kv, a silently different grouping")
+
 
 # ------------------------------------------------------------------ 4. rope
 hdr("4. rope: position enters as a rotation  (E7, E8)")
