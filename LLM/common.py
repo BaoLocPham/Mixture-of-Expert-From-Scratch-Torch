@@ -26,6 +26,8 @@ without MoE", E1-E43), so a line here can be read next to the line there:
     N, k          experts, experts per token      E19-E21
     m, n          query position, key position    E7-E9
     theta_i       rotation rate of pair i         E7
+    b             rotation base, 10^4             E7        -> base
+    s             context-extension factor        3b.2      -> scale
     alpha         aux-loss coefficient            E27       -> aux_weight
     P_tot, P_act  total, active params per token  E36, E37
 
@@ -113,13 +115,13 @@ def rope_tables(d_head, max_seq, base=10000.0, device=None):
 
     Pair i turns at rate
 
-        theta_i = beta ** (-2i / d_h)          beta = base = 10^4
+        theta_i = b ** (-2i / d_h)             b = base = 10^4
 
     and the angle applied at position m is just m * theta_i - the rate times how
     far along the sequence the token sits. `arange(0, d_h, 2)` IS the sequence
     2i = 0, 2, 4, ..., so the exponent below is exactly -2i/d_h from E7.
 
-    The rates are geometric, from 1 down to 1/beta. For d_h = 8:
+    The rates are geometric, from 1 down to 1/b. For d_h = 8:
 
         i    2i/d_h    theta_i        wavelength 2*pi/theta_i
         0    0.00      1.0            ~6 tokens        <- turns fast
@@ -351,7 +353,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.n_heads, self.n_kv_heads = cfg.n_heads, cfg.n_kv_heads
         self.d_head = cfg.d_head
-        self.n_rep = cfg.n_heads // cfg.n_kv_heads          # q heads per kv head
+        self.n_rep = cfg.n_heads // cfg.n_kv_heads          # n_h / n_kv, E11
 
         self.q_proj = nn.Linear(cfg.d_model, cfg.n_heads * cfg.d_head, bias=False)
         self.k_proj = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.d_head, bias=False)

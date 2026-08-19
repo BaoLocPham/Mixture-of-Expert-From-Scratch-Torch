@@ -1260,7 +1260,7 @@ def scaling_family_diagram():
     y2 = yy + 88
     items = [("PI", "m \u2192 m / s",
               "all pairs alike; needs fine-tuning"),
-             ("NTK-aware", "base \u2192 base\u00b7s^(d/(d\u22122))",
+             ("NTK-aware", "b \u2192 b\u00b7s^(d_h/(d_h\u22122))",
               "fast pairs kept; often no fine-tuning"),
              ("YaRN", "ramp per pair + attn temperature",
               "the current 64k\u2013128k answer")]
