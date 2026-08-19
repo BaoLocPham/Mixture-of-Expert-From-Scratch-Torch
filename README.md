@@ -47,6 +47,11 @@ the FFN slot takes either a plain feed-forward network or the routed one. Every
 "with MoE vs without" number in that track is a one-word diff on the same model,
 same seed, same batches.
 
+A second switch works the same way: `attn="vanilla"` replaces that layer with
+the one *Attention Is All You Need* wrote — sinusoidal position added at the
+input, every query head with its own k and v, biases on all four projections —
+so the seven years between the two can be priced instead of argued about.
+
 ## Notation
 
 The `LLM/` track follows one symbol table throughout — `d`, `d_h`, `d_ff`, `N`,
@@ -194,10 +199,10 @@ fighting the language-modelling objective.
 │       ├── sparse_moe.py
 │       └── check.py
 └── LLM/
-    ├── common.py               RMSNorm, RoPE, GQA attention, blocks, TinyLLM
+    ├── common.py               RMSNorm, RoPE, GQA and 2017 attention, blocks, TinyLLM
     ├── steps_llm.py            4 tokens through one layer, every intermediate printed
     ├── run_llm.py              the whole model, dissected - dense against MoE
-    ├── diagrams.py             SVG sources for the RoPE notes
+    ├── diagrams.py             SVG sources for the RoPE and attention notes
     └── from_scratch/
         ├── README.md           the exercise brief
         ├── llm.py              stubs to fill in

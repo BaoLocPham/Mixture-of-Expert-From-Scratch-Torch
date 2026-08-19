@@ -14,6 +14,7 @@ helps is worthless without a loss curve behind it.
 
   1. flow + dims      - every tensor from token id to logit      (E1-E15, E32)
   2. attention        - causality, the KV cache, GQA              (E9-E11, E40)
+  2b. vanilla         - the same layer as the 2017 paper wrote it (E9-E11)
   3. rope             - position as rotation, past the table      (E7, E8)
   4. where params are - the budget, and how it moves               (E34-E36)
   5. dense vs moe     - the same model with one word changed      (E18 vs E21, E37)
@@ -27,16 +28,20 @@ import sys
 import time
 from pathlib import Path
 
+from dataclasses import replace
+
 import torch
 import torch.nn.functional as F
 
 _here = Path(__file__).resolve().parent
-if os.environ.get("LLM_IMPL", "common") in ("scratch", "from_scratch"):
+SCRATCH = os.environ.get("LLM_IMPL", "common") in ("scratch", "from_scratch")
+if SCRATCH:
     sys.path.insert(0, str(_here / "from_scratch"))
     from llm import LLMConfig, TinyLLM, rope_tables, apply_rope, build
 else:
     sys.path.insert(0, str(_here))
-    from common import LLMConfig, TinyLLM, rope_tables, apply_rope, build
+    from common import (LLMConfig, TinyLLM, rope_tables, apply_rope, build,
+                        CausalSelfAttention, VanillaSelfAttention, sinusoidal_pe)
 
 torch.manual_seed(0)
 torch.set_printoptions(precision=4, sci_mode=False)
@@ -129,6 +134,81 @@ print(f"  at 8k context, batch 32, fp16: "
       f"{kv_full * 8192 * 32 * 2 / 1e9:.2f} GB -> {kv_gqa * 8192 * 32 * 2 / 1e9:.2f} GB")
 print("The query side is untouched, so the model keeps all its attention")
 print("patterns. What shrinks is the thing that runs out of memory at serving.")
+
+
+# --------------------------------------------------------------- 2b. vanilla
+hdr("2b. the same layer, 2017 edition  (attn=\"vanilla\")")
+
+if SCRATCH:
+    print("skipped: attn=\"vanilla\" is reference-only, and LLM_IMPL=scratch is")
+    print("running your llm.py, which implements the RoPE + GQA layer alone.")
+
+if not SCRATCH:
+    van_cfg = replace(cfg, attn="vanilla", n_kv_heads=cfg.n_heads)
+    van = TinyLLM(van_cfg).eval()
+    van_base, _ = van(ids)
+
+    print("Attention Is All You Need, unchanged: sinusoidal position ADDED to the")
+    print("embedding once, every query head with its own k and v, biases on all four")
+    print("projections. Same E9-E11 in the middle - the scaling, the mask, the")
+    print("softmax, the concat - so the only structural difference is GQA.\n")
+
+    p_rope = sum(p_.numel() for p_ in model.parameters())
+    p_van = sum(p_.numel() for p_ in van.parameters())
+    n_bias = 4 * cfg.d_model * cfg.n_layers
+    n_kv_extra = 2 * cfg.d_model * (cfg.n_heads - cfg.n_kv_heads) * cfg.d_head * cfg.n_layers
+    print(f"  parameters      rope {p_rope:,}     vanilla {p_van:,}   "
+          f"(+{p_van - p_rope:,})")
+    print(f"    of which  wider k and v {n_kv_extra:,}   biases {n_bias:,}"
+          f"   {'(they agree)' if n_kv_extra + n_bias == p_van - p_rope else '(MISMATCH)'}")
+
+    kv_rope = 2 * cfg.n_layers * cfg.n_kv_heads * cfg.d_head
+    kv_van = 2 * cfg.n_layers * cfg.n_heads * cfg.d_head
+    print(f"  KV floats/token rope {kv_rope:<9,} vanilla {kv_van:<9,} "
+          f"({kv_van / kv_rope:.0f}x - the whole of GQA, and the reason it exists)")
+    print(f"  position table  rope cos/sin {tuple(model.cos.shape)} x2, read every "
+          f"layer")
+    print(f"                  vanilla pe {tuple(van.pe.shape)}, read once at the input")
+
+    # causality and the cache hold for the 2017 layer too - same mask, same offset
+    probe2 = ids.clone()
+    probe2[:, 5] = (probe2[:, 5] + 7) % cfg.vocab_size
+    van_delta = (van(probe2)[0] - van_base).abs().amax(dim=-1)[0]
+    assert van_delta[:5].max() == 0
+    vc = [{} for _ in van.blocks]
+    van_inc = torch.cat([van(ids[:, t:t + 1], caches=vc, pos=t)[0] for t in range(T)], 1)
+    print(f"\n  causality: zero change before position 5      (max "
+          f"{van_delta[:5].max():.1e})")
+    print(f"  cached vs full pass: max |diff| {(van_inc - van_base).abs().max():.2e}")
+    print("Both properties are the mask's, not RoPE's - which is why they survive")
+    print("the swap untouched.")
+
+    # where position actually lives: shuffle a prefix and see what survives.
+    # One layer, not the stack - at depth 2 a shuffled position's own output feeds
+    # the later ones, so the invariance below is a statement about the LAYER.
+    xv = torch.randn(1, T, cfg.d_model) * 0.5
+    perm = torch.tensor([2, 0, 3, 1] + list(range(4, T)))
+    pe1 = sinusoidal_pe(cfg.max_seq, cfg.d_model)[:T]
+    van_l = VanillaSelfAttention(van_cfg).eval()
+    rope_l = CausalSelfAttention(cfg).eval()
+    with torch.no_grad():
+        def moved(fn, inp):
+            return (fn(inp)[:, 4:] - fn(inp[:, perm])[:, 4:]).abs().max()
+        m_none = moved(lambda t: van_l(t), xv)
+        m_pe = moved(lambda t: van_l(t + pe1), xv)
+        m_rope = moved(lambda t: rope_l(t, model.cos[:T], model.sin[:T]), xv)
+
+    print("\npermute the first 4 tokens and read the outputs at positions 4..11:")
+    print(f"  vanilla layer, no position signal   {m_none:.2e}   <- unchanged")
+    print(f"  vanilla layer, + sinusoidal PE      {m_pe:.2e}")
+    print(f"  this layer, RoPE inside             {m_rope:.2e}")
+    print("The first line is what 'attention is permutation-equivariant' means,")
+    print("measured: with no positional signal the output at position t is a")
+    print("function of the SET of tokens before it, not their order. The causal")
+    print("mask alone does not fix that - it decides who may look at whom, never")
+    print("how far apart they are. The 2017 encoding and RoPE are two answers, and")
+    print("the six orders of magnitude between line 1 and lines 2-3 is the whole")
+    print("contribution of both.")
 
 
 # ------------------------------------------------------------------ 3. rope

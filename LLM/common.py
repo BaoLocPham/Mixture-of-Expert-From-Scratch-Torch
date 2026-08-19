@@ -5,7 +5,13 @@ in one sitting, built from the same parts every modern LLM is built from.
     embed -> [ RMSNorm -> attention -> + ] [ RMSNorm -> FFN -> + ] x L -> RMSNorm -> logits
 
 The FFN slot takes either a single feed-forward network (`ffn="dense"`) or a
-top-k mixture of them (`ffn="moe"`). Nothing else in the model changes. That is
+top-k mixture of them (`ffn="moe"`). Nothing else in the model changes.
+
+A second switch, `attn`, swaps this file's attention layer (RoPE + grouped
+query heads, what a 2024 model runs) for the one "Attention Is All You Need"
+wrote in 2017 (sinusoidal position added at the input, every head with its own
+k and v). Same purpose as the FFN switch: make a seven-year architectural
+difference a one-word diff, so it can be priced instead of argued about. That is
 the whole reason this track exists: it makes "with MoE" and "without MoE" a
 one-word diff, so every difference in parameters, FLOPs and loss can be
 attributed to that one substitution rather than to two separately-written models.
@@ -52,8 +58,10 @@ import torch.nn.functional as F
 class LLMConfig:
     """Every shape in the model, in one place.
 
-    The only field that changes the architecture is `ffn`. Everything else
-    changes sizes.
+    Two fields change the architecture; everything else changes sizes.
+
+        ffn   "dense" | "moe"        - the slot this whole track is about
+        attn  "rope"  | "vanilla"    - this layer, or the one the 2017 paper wrote
     """
     vocab_size: int = 64
     d_model: int = 64
@@ -62,6 +70,7 @@ class LLMConfig:
     n_kv_heads: int = None      # None -> = n_heads (plain MHA). Fewer -> GQA.
     d_ff: int = 128
     max_seq: int = 64
+    attn: str = "rope"          # "rope" (RoPE + GQA) | "vanilla" (2017 MHA)
     ffn: str = "dense"          # "dense" | "moe"
     n_experts: int = 4          # ffn="moe" only
     k: int = 2                  # ffn="moe" only
@@ -74,6 +83,11 @@ class LLMConfig:
         assert self.d_model % self.n_heads == 0, "d_model must split evenly into heads"
         assert self.n_heads % self.n_kv_heads == 0, "each kv head must serve a whole number of q heads"
         assert self.ffn in ("dense", "moe")
+        assert self.attn in ("rope", "vanilla")
+        if self.attn == "vanilla":
+            assert self.n_kv_heads == self.n_heads, (
+                "vanilla attention is the 2017 layer: every query head has its "
+                "own k and v. Set n_kv_heads = n_heads, or use attn='rope'.")
 
     @property
     def d_head(self):
@@ -411,6 +425,106 @@ class CausalSelfAttention(nn.Module):
         return self.o_proj(y)                                # (B, T, d)  E11
 
 
+# ------------------------------------------------- attention, the 2017 version
+def sinusoidal_pe(max_seq, d_model, base=10000.0, device=None):
+    r"""The original absolute positional encoding (Vaswani et al., 2017).
+
+    Returns (max_seq, d_model), to be ADDED to the token embeddings once, before
+    any block runs:
+
+        PE[m, 2j]   = sin(m / b**(2j/d)),      PE[m, 2j+1] = cos(m / b**(2j/d))
+
+    Compare `rope_tables` above and the family resemblance is the point: same
+    base, same geometric frequency ladder, same pairing of channels. What
+    differs is the verb. This is ADDED to x once at the input; RoPE ROTATES q
+    and k with it inside every layer - and that difference is the whole reason
+    the dot product ends up seeing only n - m (E8) in one case and not the
+    other.
+
+    Two consequences of adding rather than rotating, both easy to miss:
+      - the signal has to survive L blocks of residual arithmetic, because
+        nothing re-injects it;
+      - position 2049 does not exist in a table built for 2048, and there is no
+        reason the model should read a gap of 3 the same way at m = 4 and at
+        m = 400 - it had to learn each offset separately.
+    """
+    m = torch.arange(max_seq, device=device).float()[:, None]      # (max_seq, 1)
+    two_j = torch.arange(0, d_model, 2, device=device).float()     # (d/2,)
+    ang = m / base ** (two_j / d_model)                            # (max_seq, d/2)
+    pe = torch.zeros(max_seq, d_model, device=device)
+    pe[:, 0::2] = ang.sin()
+    pe[:, 1::2] = ang.cos()
+    return pe
+
+
+class VanillaSelfAttention(nn.Module):
+    """Multi-head attention exactly as "Attention Is All You Need" wrote it.
+
+    Same four equations as `CausalSelfAttention` - E6, E9, E10, E11 - and the
+    same shapes. Four things are deliberately different, and each one is a
+    decision the field made LATER:
+
+      1. no GQA. Every query head has its own k and v, so the k/v projections
+         are full width and the KV cache is n_h/n_kv times bigger. GQA (2023)
+         is the only structural difference between the two classes.
+      2. no RoPE. Position is added to the embedding once, by `sinusoidal_pe`,
+         and this layer never hears about it. That is why forward() takes cos
+         and sin and ignores them - so `attn="vanilla"` stays a one-word swap.
+      3. biases on all four projections, as in the paper's implementation and
+         in torch's own nn.MultiheadAttention. LLaMA and everything after it
+         dropped them: they cost parameters and buy nothing measurable.
+      4. no dropout on the attention weights. The paper has it (p_drop = 0.1);
+         this track has no dropout anywhere, so leaving it out keeps the two
+         classes comparable rather than faithful. It is the one paper feature
+         missing here.
+
+    What is NOT different: the scaling by sqrt(d_h), the causal mask, the
+    softmax, the concat-and-project. Those are 2017 and unchanged.
+
+    The cache works the same way. It is not in the paper - decoding one token
+    at a time with stored k/v is an inference technique that came later - but
+    it is a pure optimisation, so including it changes no output.
+    """
+
+    def __init__(self, cfg: LLMConfig):
+        super().__init__()
+        self.n_heads, self.d_head = cfg.n_heads, cfg.d_head
+        d = cfg.d_model
+        self.q_proj = nn.Linear(d, d, bias=True)              # W^Q, all heads
+        self.k_proj = nn.Linear(d, d, bias=True)              # W^K
+        self.v_proj = nn.Linear(d, d, bias=True)              # W^V
+        self.o_proj = nn.Linear(d, d, bias=True)              # W^O
+
+    def _split(self, t):
+        B, T, _ = t.shape
+        return t.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+
+    def forward(self, x, cos=None, sin=None, cache=None):
+        """x: (B, T, d) -> (B, T, d). cos/sin are ignored - see the docstring."""
+        B, T, d = x.shape
+
+        q = self._split(self.q_proj(x))                       # (B, H, T, dh)
+        k = self._split(self.k_proj(x))                       # full width: no GQA
+        v = self._split(self.v_proj(x))
+
+        if cache is not None:
+            if "k" in cache:
+                k = torch.cat([cache["k"], k], dim=2)
+                v = torch.cat([cache["v"], v], dim=2)
+            cache["k"], cache["v"] = k, v
+
+        n_keys = k.shape[2]
+        att = (q @ k.transpose(-1, -2)) / self.d_head ** 0.5  # E9
+
+        m = torch.arange(n_keys - T, n_keys, device=x.device)[:, None]
+        n = torch.arange(n_keys, device=x.device)[None, :]
+        att = att.masked_fill(n > m, float("-inf"))
+
+        p = att.softmax(dim=-1)                               # E10
+        y = (p @ v).transpose(1, 2).reshape(B, T, self.n_heads * self.d_head)
+        return self.o_proj(y)                                 # E11
+
+
 # --------------------------------------------------------------------- ffn
 class FeedForward(nn.Module):
     """SwiGLU feed-forward - E18:
@@ -519,7 +633,8 @@ class Block(nn.Module):
     def __init__(self, cfg: LLMConfig):
         super().__init__()
         self.norm1 = RMSNorm(cfg.d_model)
-        self.attn = CausalSelfAttention(cfg)
+        self.attn = (VanillaSelfAttention(cfg) if cfg.attn == "vanilla"
+                     else CausalSelfAttention(cfg))
         self.norm2 = RMSNorm(cfg.d_model)
         self.is_moe = cfg.ffn == "moe"
         self.ffn = (MoEFeedForward(cfg.d_model, cfg.d_ff, cfg.n_experts, cfg.k)
@@ -567,6 +682,14 @@ class TinyLLM(nn.Module):
         self.register_buffer("cos", cos, persistent=False)    # (max_seq, d_h/2)
         self.register_buffer("sin", sin, persistent=False)
 
+        # attn="vanilla" has no rotation, so position has to enter at the input
+        # instead - once, added to the embedding, exactly as in the 2017 paper.
+        # The cos/sin buffers above are then built and never read.
+        self.abs_pe = cfg.attn == "vanilla"
+        if self.abs_pe:
+            self.register_buffer("pe", sinusoidal_pe(cfg.max_seq, cfg.d_model),
+                                 persistent=False)            # (max_seq, d)
+
         self.apply(self._init)
 
     def _init(self, m):
@@ -583,6 +706,8 @@ class TinyLLM(nn.Module):
         """
         B, T = idx.shape
         x = self.embed(idx)                                   # (B, T, d)
+        if self.abs_pe:
+            x = x + self.pe[pos:pos + T]                      # 2017: add it once
         cos, sin = self.cos[pos:pos + T], self.sin[pos:pos + T]
 
         auxes = []
@@ -619,9 +744,10 @@ class TinyLLM(nn.Module):
         bug is invisible until quality quietly drops.
         """
         total = idx.shape[1] + max_new_tokens
+        table = "positional-encoding table" if self.abs_pe else "RoPE table"
         assert total <= self.cfg.max_seq, (
             f"generating {max_new_tokens} tokens from a {idx.shape[1]}-token prompt "
-            f"needs {total} positions, but the RoPE table only has "
+            f"needs {total} positions, but the {table} only has "
             f"{self.cfg.max_seq}. Nothing else in the model is length-limited - "
             f"raise max_seq (and expect quality to fall off past the lengths it "
             f"was trained on).")
