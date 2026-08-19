@@ -1530,6 +1530,88 @@ def rope_half_trace_diagram():
                 "worked out.", b)
 
 
+# ------------------------------------------------ 66. 2017 vs now, side by side
+def two_attentions_diagram():
+    """VanillaSelfAttention and CausalSelfAttention, line for line."""
+    b = txt(340, 24, "Two attention layers, seven years apart", 13, PRI,
+            "middle", "500")
+    b += txt(340, 44, "attn=\u201cvanilla\u201d and attn=\u201crope\u201d in "
+             "LLM/common.py \u2014 same file, same TinyLLM", 11, SEC, "middle")
+
+    CW, x1, x2 = 228, 142, 390
+    b += vcell(x1, 74, CW, 26, "coral", "2017  \u00b7  VanillaSelfAttention",
+               size=10.5, weight="500")
+    b += vcell(x2, 74, CW, 26, "teal", "now  \u00b7  CausalSelfAttention",
+               size=10.5, weight="500")
+
+    rows = [
+        ("position", "sinusoidal PE, added to the\nembedding once", "coral",
+         "RoPE, rotating q and k in\nevery block", "teal"),
+        ("q_proj", "d \u2192 d, with bias", "coral",
+         "d \u2192 n_h\u00b7d_h, no bias", "teal"),
+        ("k_proj, v_proj", "d \u2192 d, with bias", "coral",
+         "d \u2192 n_kv\u00b7d_h, no bias", "teal"),
+        ("q @ k\u1d40 / \u221ad_h", "identical", "gray", "identical", "gray"),
+        ("+ causal mask", "identical", "gray", "identical", "gray"),
+        ("softmax", "identical", "gray", "identical", "gray"),
+        ("dropout on p", "p_drop = 0.1 in the paper;\nnot in this track", "coral",
+         "none", "gray"),
+        ("@ v, merge heads", "identical", "gray", "identical", "gray"),
+        ("o_proj", "d \u2192 d, with bias", "coral",
+         "d \u2192 d, no bias", "teal"),
+    ]
+    y = 110
+    for name, la, ra_, rb, rc in rows:
+        two = "\n" in la or "\n" in rb
+        h = 34 if two else 24
+        b += txt(x1 - 10, y + h / 2, name, 9.5, PRI, "end", "500")
+        for xx, lab, ramp in ((x1, la, ra_), (x2, rb, rc)):
+            parts = lab.split("\n")
+            b += vcell(xx, y, CW, h, ramp, "" if len(parts) > 1 else lab, size=9)
+            if len(parts) > 1:
+                for i, pt in enumerate(parts):
+                    b += txt(xx + CW / 2, y + h / 2 - 7 + i * 14, pt, 9,
+                             RAMP[ramp][2], "middle")
+        y += h + 5
+
+    yy = y + 14
+    b += txt(340, yy, "Four of the nine rows are literally the same code. E9, "
+             "E10 and E11 were", 11.5, PRI, "middle", "500")
+    b += txt(340, yy + 18, "settled in 2017 and have not moved since \u2014 what "
+             "changed is where position", 11, SEC, "middle")
+    b += txt(340, yy + 36, "enters, how much of the key/value side you keep, and "
+             "whether there are biases.", 11, SEC, "middle")
+
+    y2 = yy + 66
+    b += txt(340, y2, "What the difference costs, on the same 3-layer model",
+             11.5, PRI, "middle", "500")
+    cols = [(120, 210, ""), (334, 116, "2017"), (454, 116, "now")]
+    for x, w, lab in cols:
+        b += vcell(x, y2 + 20, w, 24, "gray", lab, size=10, weight="500")
+    facts = [("parameters", "126,144", "113,088"),
+             ("KV floats per token", "384", "192"),
+             ("position read", "once, at the input", "every layer"),
+             ("causality, cache", "0.0 / 1.8e-07", "0.0 / 2.4e-07")]
+    for i, (lab, a_, c_) in enumerate(facts):
+        yy2 = y2 + 47 + i * 27
+        b += vcell(120, yy2, 210, 24, "gray", lab, size=9.5)
+        b += vcell(334, yy2, 116, 24, "coral", a_, size=9.5)
+        b += vcell(454, yy2, 116, 24, "teal", c_, size=9.5)
+
+    y3 = y2 + 47 + len(facts) * 27 + 18
+    b += txt(340, y3, "The 13,056 extra parameters are 12,288 of wider k and v "
+             "plus 768 of bias.", 11, SEC, "middle")
+    b += txt(340, y3 + 18, "The 2\u00d7 KV cache is the whole of GQA, and the "
+             "reason anyone adopted it.", 11, SEC, "middle")
+    b += txt(340, y3 + 40, "Causality and the cache are properties of the MASK, "
+             "not of RoPE \u2014 which is why", 11, PRI, "middle", "500")
+    b += txt(340, y3 + 58, "they survive the swap unchanged.", 11, PRI, "middle",
+             "500")
+    return wrap(680, y3 + 86, "2017 attention vs now",
+                "The nine steps of an attention layer, and the four that changed "
+                "in seven years.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1550,6 +1632,7 @@ DIAGRAMS = {
     "63_newaxis.svg": newaxis_diagram,
     "64_rope_half_cat.svg": rope_half_cat_diagram,
     "65_rope_half_trace.svg": rope_half_trace_diagram,
+    "66_two_attentions.svg": two_attentions_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
