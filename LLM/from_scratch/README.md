@@ -7,6 +7,35 @@ and diagnoses the specific mistake without giving up the answer.
 python LLM/from_scratch/check.py        # run this constantly
 ```
 
+## Start here if you want RoPE on its own
+
+`rope.py` is a separate, self-contained exercise for the one piece of this
+layer that is genuinely fiddly — with a grader that goes much further than
+stage 2 below.
+
+```bash
+python LLM/from_scratch/check_rope.py    # run this constantly
+python LLM/from_scratch/rope.py          # print your own tables and look at them
+```
+
+| # | What | The idea |
+|---|------|----------|
+| 1 | `rope_tables` (E7) | The frequency ladder, as an outer product. `(max_seq, d_h/2)` — half as wide as the head. |
+| 2 | `apply_rope` (E7, E8) | The interleaved (GPT-J) rotation. The last check is E8, and it is the only one that matters. |
+| 3 | `rotate_half`, `apply_rope_half` | The split-half (GPT-NeoX / HuggingFace) convention, and the proof that it is the *same function* on a permuted channel order. |
+| 4 | `rope_tables_scaled` | Position Interpolation — how a 2k model is run at 8k, in one line. |
+
+It names five wrong implementations by their output: the exponent missing its
+factor of 2, the frequency ladder running backwards, the rotation matrix
+transposed, `cat` instead of an interleave, and the two channel conventions
+crossed. Stages 3 and 4 are checked against the code *you* wrote in 1 and 2,
+so those have to be right first.
+
+Nothing in `rope.py` imports the rest of the track, so it can be done before
+anything else. When it passes, paste stages 1 and 2 into `llm.py`.
+
+---
+
 Edit `llm.py`. Do `DenseMoe/from_scratch` and `SparseMoe/from_scratch` first —
 the FFN and the routed FFN are imported here already built, because you built
 them there. (The FFN you import is the three-matrix SwiGLU of E18, not the
