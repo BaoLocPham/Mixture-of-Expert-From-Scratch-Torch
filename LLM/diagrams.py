@@ -1378,6 +1378,158 @@ def newaxis_diagram():
                 "over batch and head.", b)
 
 
+# ------------------------------------------ 64. apply_rope_half, the duplication
+ARH_COS = [-0.9900, 0.9553, 0.9996, 1.0000]        # rope_tables(8, 16) row m = 3
+ARH_SIN = [0.1411, 0.2955, 0.0300, 0.0030]
+ARH_X = [0.6, -0.2, 0.9, 0.4, -0.7, 0.1, 0.3, -0.5]
+ARH_RH = [0.7, -0.1, -0.3, 0.5, 0.6, -0.2, 0.9, 0.4]
+ARH_XC = [-0.5940, -0.1911, 0.8996, 0.4000, 0.6930, 0.0955, 0.2999, -0.5000]
+ARH_RS = [0.0988, -0.0296, -0.0090, 0.0015, 0.0847, -0.0591, 0.0270, 0.0012]
+ARH_OUT = [-0.4952, -0.2206, 0.8906, 0.4015, 0.7777, 0.0364, 0.3269, -0.4988]
+
+
+def rope_half_cat_diagram():
+    """cat([cos, cos]) is what decides the split-half pairing."""
+    n, half = 8, 4
+    CW, G = 68, 5
+    x0 = (680 - (n * (CW + G) - G)) / 2
+
+    b = txt(340, 24, "apply_rope_half step 1: cat([cos, cos], dim=-1)",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, "the tables are d_h/2 wide; this form needs one entry per "
+             "CHANNEL", 11, SEC, "middle")
+
+    # the (T, d_h/2) row, centred over the left half
+    y1 = 96
+    b += txt(x0 - 12, y1 + 13, "cos", 10.5, PRI, "end", "500")
+    for j in range(half):
+        b += vcell(x0 + j * (CW + G), y1, CW, 26, PAIR_RAMP[j],
+                   f"{ARH_COS[j]:+.4f}", size=9)
+        b += txt(x0 + j * (CW + G) + CW / 2, y1 - 14, f"\u03b8{j}", 9,
+                 RAMP[PAIR_RAMP[j]][2], "middle", "500")
+    b += txt(x0 + half * (CW + G) + 8, y1 + 13, f"(T, d_h/2) \u2014 {half} columns",
+             9.5, SEC, "start")
+
+    b += arrow(110, y1 + 32, 110, y1 + 58)
+    b += txt(122, y1 + 45, "cat([cos, cos], dim=-1)", 10.5, PRI, "start", "500")
+
+    y2 = y1 + 84
+    b += txt(x0 - 12, y2 + 13, "c", 10.5, PRI, "end", "500")
+    for j in range(n):
+        b += vcell(x0 + j * (CW + G), y2, CW, 26, PAIR_RAMP[j % half],
+                   f"{ARH_COS[j % half]:+.4f}", size=9)
+        b += txt(x0 + j * (CW + G) + CW / 2, y2 - 14, f"ch {j}", 9, SEC, "middle")
+    for j in range(half):
+        xa = x0 + j * (CW + G) + CW / 2
+        xc = x0 + (j + half) * (CW + G) + CW / 2
+        b += arc(xa, xc, y2 + 30, -(16 + 9 * j), RAMP[PAIR_RAMP[j]][1], "")
+
+    yy = y2 + 106
+    b += txt(340, yy, "Channel j and channel j + d_h/2 now hold the SAME number.",
+             12, PRI, "middle", "500")
+    b += txt(340, yy + 20, "That is the split-half pairing \u2014 not a separate "
+             "decision made elsewhere, just", 11, SEC, "middle")
+    b += txt(340, yy + 38, "the consequence of duplicating a table that was one "
+             "entry per pair.", 11, SEC, "middle")
+    b += txt(340, yy + 60, "apply_rope makes the same decision with a slice "
+             "instead: x[..., 0::2] takes", 11, SEC, "middle")
+    b += txt(340, yy + 78, "the firsts, x[..., 1::2] the seconds, so partners end "
+             "up adjacent.", 11, SEC, "middle")
+
+    y3 = yy + 108
+    b += txt(340, y3, "The four lines, with shapes", 12, PRI, "middle", "500")
+    rows = [("cos, sin", "(T, d_h/2)", "gray", "one angle per pair"),
+            ("cat([cos, cos], -1)", "(T, d_h)", "coral",
+             "one per channel; j and j+d_h/2 agree"),
+            ("[None, None]", "(1, 1, T, d_h)", "purple",
+             "batch and head axes, to broadcast"),
+            ("x * c", "(B, H, T, d_h)", "teal", "the cosine term"),
+            ("rotate_half(x) * s", "(B, H, T, d_h)", "teal", "the sine term"),
+            ("their sum", "(B, H, T, d_h)", "teal", "= E7, every pair at once")]
+    yy3 = y3 + 22
+    for name, shape, ramp, note in rows:
+        b += vcell(48, yy3, 176, 24, ramp, name, size=9.5, weight="500")
+        b += vcell(230, yy3, 136, 24, ramp, shape, size=9.5)
+        b += txt(376, yy3 + 12, note, 9.5, SEC, "start")
+        yy3 += 27
+    return wrap(680, yy3 + 20, "apply_rope_half: the duplication",
+                "How cat([cos, cos]) makes channel j and j + d_h/2 share an "
+                "angle.", b)
+
+
+# ------------------------------- 65. apply_rope_half, the arithmetic row by row
+def rope_half_trace_diagram():
+    """Every intermediate row of `x * c + rotate_half(x) * s`, with numbers."""
+    n, half = 8, 4
+    CW, G = 62, 4
+    x0 = 142
+
+    b = txt(340, 24, "apply_rope_half: x \u00b7 c + rotate_half(x) \u00b7 s, "
+            "row by row", 13, PRI, "middle", "500")
+    b += txt(340, 44, "d_h = 8, one token at m = 3 \u2014 every value printed by "
+             "check_rope.py", 11, SEC, "middle")
+
+    rows = [("x", ARH_X, "gray", None),
+            ("c", [ARH_COS[j % half] for j in range(n)], "purple", None),
+            ("x \u00b7 c", ARH_XC, "purple", "the cosine term"),
+            ("rotate_half(x)", ARH_RH, "gray", "second half negated, moved front"),
+            ("s", [ARH_SIN[j % half] for j in range(n)], "coral", None),
+            ("rotate_half(x) \u00b7 s", ARH_RS, "coral", "the sine term"),
+            ("out", ARH_OUT, "teal", "their sum")]
+    y = 84
+    for j in range(n):
+        b += txt(x0 + j * (CW + G) + CW / 2, y - 12, f"ch {j}", 9, SEC, "middle")
+    for name, vals, ramp, note in rows:
+        b += txt(x0 - 12, y + 13, name, 10, PRI, "end", "500")
+        for j, v in enumerate(vals):
+            b += vcell(x0 + j * (CW + G), y, CW, 26, ramp, f"{v:+.4f}", size=8.5)
+        if note:
+            b += txt(340, y + 40, note, 9, SEC, "middle")
+            y += 50
+        else:
+            y += 32
+
+    yy = y + 8
+    b += txt(340, yy, "Follow one pair: channels 0 and 4, angle \u03b8\u2080",
+             12, PRI, "middle", "500")
+    a0, b0 = ARH_X[0], ARH_X[half]
+    c0, s0 = ARH_COS[0], ARH_SIN[0]
+    lines = [
+        f"ch 0:   x\u00b7c = {a0:+.2f}\u00d7({c0:+.4f}) = {a0 * c0:+.4f}   \u2502   "
+        f"rh\u00b7s = ({-b0:+.2f})\u00d7{s0:+.4f} = {(-b0) * s0:+.4f}   \u2502   "
+        f"sum {ARH_OUT[0]:+.4f}",
+        f"ch 4:   x\u00b7c = {b0:+.2f}\u00d7({c0:+.4f}) = {b0 * c0:+.4f}   \u2502   "
+        f"rh\u00b7s = ({a0:+.2f})\u00d7{s0:+.4f} = {a0 * s0:+.4f}   \u2502   "
+        f"sum {ARH_OUT[half]:+.4f}",
+    ]
+    for i, ln in enumerate(lines):
+        b += txt(340, yy + 24 + i * 18, ln, 9, SEC, "middle")
+
+    y2 = yy + 72
+    b += vcell(96, y2, 488, 28, "teal",
+               "ch 0 = a\u00b7cos \u2212 b\u00b7sin   \u2502   "
+               "ch 4 = a\u00b7sin + b\u00b7cos   \u2502   which is E7",
+               size=11, weight="500")
+
+    y3 = y2 + 46
+    b += txt(340, y3, "Two coincidences that are not coincidences:", 11.5, PRI,
+             "middle", "500")
+    b += txt(340, y3 + 20, "the MINUS on channel 0 is rotate_half's negation "
+             "(it put \u2212x[4] at slot 0), and", 11, SEC, "middle")
+    b += txt(340, y3 + 38, "channel 4 reads cos[0] rather than a fourth angle "
+             "because the cat put it there.", 11, SEC, "middle")
+    b += txt(340, y3 + 60, "Neither line mentions a pair. The pairing lives "
+             "entirely in those two moves.", 11, SEC, "middle")
+
+    b += txt(340, y3 + 90, "Sanity: each pair keeps its own length, to 1e-07. "
+             "A rotation cannot change it,", 11, PRI, "middle", "500")
+    b += txt(340, y3 + 108, "and a wrong pairing almost always does.",
+             11, PRI, "middle", "500")
+    return wrap(680, y3 + 136, "apply_rope_half, traced",
+                "Every intermediate row of the split-half rotation, and one pair "
+                "worked out.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1396,6 +1548,8 @@ DIAGRAMS = {
     "61_pi_tradeoff.svg": pi_tradeoff_diagram,
     "62_scaling_family.svg": scaling_family_diagram,
     "63_newaxis.svg": newaxis_diagram,
+    "64_rope_half_cat.svg": rope_half_cat_diagram,
+    "65_rope_half_trace.svg": rope_half_trace_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
