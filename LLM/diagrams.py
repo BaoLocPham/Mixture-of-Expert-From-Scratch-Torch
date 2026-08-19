@@ -1086,6 +1086,202 @@ def convention_swap_diagram():
                 "k disagree.", b)
 
 
+# ------------------------------------------------ 60. position interpolation
+PI_SCALE = 4
+PI_LEN = 16
+PI_TRAIN = 4                                   # positions the model was trained on
+# check_rope.py's fixture: one fixed (q, k), scored at two gaps
+PI_DOT_PLAIN_1 = 0.150094
+PI_DOT_SCALED_4 = 0.150094
+PI_DOT_PLAIN_4 = -1.149394
+# a real head: wavelengths in tokens, d_h = 64, base 10000, and NTK base 41829
+PI_PAIRS = [0, 8, 16, 24, 31]
+PI_LAM = [6.28, 62.8, 628.3, 6283.2, 47117.2]
+PI_LAM_NTK = [6.28, 89.9, 1285.1, 18377.7, 188469.0]
+
+
+def pi_positions_diagram():
+    """PI squeezes the position axis instead of extending it."""
+    n, sc, tr = PI_LEN, PI_SCALE, PI_TRAIN
+    x0, x1 = 60, 620
+    step = (x1 - x0) / (n - 1)
+
+    b = txt(340, 24, "Position Interpolation: squeeze the axis, do not extend it",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, f"a model trained on {tr} positions, asked to read {n} \u2014 "
+             f"scale = {sc}", 11, SEC, "middle")
+
+    def axis(y, label):
+        g = (f'<line x1="{x0 - 14}" y1="{y}" x2="{x1 + 14}" y2="{y}" '
+             f'stroke="{ARR}" stroke-width="1"/>')
+        g += txt(x0 - 14, y - 18, label, 10, PRI, "start", "500")
+        for m in (0, 4, 8, 12, 15):
+            x = x0 + m * step
+            g += (f'<line x1="{x}" y1="{y - 4}" x2="{x}" y2="{y + 4}" '
+                  f'stroke="{ARR}" stroke-width="1"/>')
+            g += txt(x, y + 16, f"{m}", 9, SEC, "middle")
+        return g
+
+    # the band of angles the model has actually seen
+    bw = (tr - 0.1) * step
+    band = (f'<rect x="{x0 - 8}" y="86" width="{bw + 16}" height="176" rx="4" '
+            f'fill="{RAMP["teal"][0]}" stroke="{RAMP["teal"][1]}" '
+            f'stroke-width="0.8" stroke-dasharray="4 3"/>')
+    b += band
+    b += txt(x0 + bw / 2 + 4, 76, "the range the model was trained on", 9.5,
+             RAMP["teal"][2], "middle", "500")
+
+    y1 = 130
+    b += axis(y1, "unscaled")
+    for m in range(n):
+        inside = m < tr
+        col = RAMP["teal"][1] if inside else RAMP["coral"][1]
+        b += (f'<circle cx="{x0 + m * step}" cy="{y1}" r="4.5" fill="{col}" '
+              f'opacity="{1.0 if inside else 0.85}"/>')
+    b += txt(x1 + 14, y1 - 18, f"{n - tr} past the edge", 9.5,
+             RAMP["coral"][2], "end", "500")
+
+    y2 = 226
+    b += axis(y2, f"m \u00f7 {sc}")
+    for m in range(n):
+        b += (f'<circle cx="{x0 + (m / sc) * step}" cy="{y2}" r="4.5" '
+              f'fill="{RAMP["teal"][1]}"/>')
+    b += txt(x1 + 14, y2 - 18, "all sixteen, inside", 9.5,
+             RAMP["teal"][2], "end", "500")
+
+    yy = 300
+    b += txt(340, yy, f"Row m of the scaled table IS row m/{sc} of the plain one.",
+             12, PRI, "middle", "500")
+    b += txt(340, yy + 20, f"check_rope.py verifies it at m = 4, 8, 12 \u2014 and that "
+             f"scale = 1 reproduces", 11, SEC, "middle")
+    b += txt(340, yy + 38, "rope_tables exactly. Nothing else in the model changes: "
+             "same weights, same", 11, SEC, "middle")
+    b += txt(340, yy + 56, "thetas, same code path. Only the number handed to the "
+             "table moves.", 11, SEC, "middle")
+    b += txt(340, yy + 84, "A real case: pair 0 reaches 8192 radians at 8k tokens, "
+             "against the 2048 it", 11, PRI, "middle", "500")
+    b += txt(340, yy + 102, f"saw in training. Divide the positions by 4 and it is "
+             "back at 2048.", 11, PRI, "middle", "500")
+    return wrap(680, yy + 130, "Position Interpolation",
+                "Sixteen positions squeezed into the four the model was trained on.",
+                b)
+
+
+# ------------------------------------------------------------- 61. what it costs
+def pi_tradeoff_diagram():
+    """The same equality, read as the price."""
+    sc = PI_SCALE
+    b = txt(340, 24, "What interpolation actually trades", 13, PRI, "middle", "500")
+    b += txt(340, 44, "one fixed (q, k), scored at two gaps \u2014 printed by "
+             "check_rope.py stage 4", 11, SEC, "middle")
+
+    rows = [("plain tables", "1 token", f"{PI_DOT_PLAIN_1:+.6f}", "gray"),
+            (f"scaled by {sc}", f"{sc} tokens", f"{PI_DOT_SCALED_4:+.6f}", "teal"),
+            ("plain tables", f"{sc} tokens", f"{PI_DOT_PLAIN_4:+.6f}", "coral")]
+    y = 84
+    b += vcell(120, y, 180, 24, "gray", "tables", size=10, weight="500")
+    b += vcell(302, y, 140, 24, "gray", "gap", size=10, weight="500")
+    b += vcell(444, y, 140, 24, "gray", "q \u00b7 k", size=10, weight="500")
+    for i, (a, g, v, ramp) in enumerate(rows):
+        yy = y + 27 + i * 27
+        b += vcell(120, yy, 180, 24, ramp, a, size=9.5)
+        b += vcell(302, yy, 140, 24, ramp, g, size=9.5)
+        b += vcell(444, yy, 140, 24, ramp, v, size=9.5)
+
+    yy = y + 27 + len(rows) * 27 + 22
+    b += txt(340, yy, "The first two rows agree to 0.00e+00. That is the whole "
+             "mechanism:", 12, PRI, "middle", "500")
+    b += txt(340, yy + 20, f"after scaling, {sc} tokens apart produces exactly the "
+             "score 1 token apart", 11, SEC, "middle")
+    b += txt(340, yy + 38, "used to. The context window grows because the model is "
+             "being told", 11, SEC, "middle")
+    b += txt(340, yy + 56, "everything is closer together than it is.", 11, SEC, "middle")
+
+    yy2 = yy + 86
+    b += txt(340, yy2, "And that is also the price", 12, RAMP["coral"][2],
+             "middle", "500")
+    b += txt(340, yy2 + 20, f"The third row is what {sc} tokens apart used to mean: "
+             f"{PI_DOT_PLAIN_4:+.4f}, not "
+             f"{PI_DOT_SCALED_4:+.4f}.", 11, SEC, "middle")
+    b += txt(340, yy2 + 38, "Every wavelength is multiplied by the scale, the fast "
+             "pairs included \u2014 pair 0", 11, SEC, "middle")
+    b += txt(340, yy2 + 56, f"goes from {PI_LAM[0]} tokens to "
+             f"{PI_LAM[0] * PI_SCALE:.1f}, so the resolution that separated "
+             "adjacent", 11, SEC, "middle")
+    b += txt(340, yy2 + 74, "tokens now separates groups of four. Long range fits; "
+             "local detail blurs.", 11, SEC, "middle")
+    b += txt(340, yy2 + 102, "Which is exactly the observation NTK-aware scaling and "
+             "YaRN are built on.", 11, PRI, "middle", "500")
+    return wrap(680, yy2 + 130, "The interpolation trade",
+                "Identical scores at scaled gaps, and the local resolution it "
+                "costs.", b)
+
+
+# ---------------------------------------------- 62. the family of scaling methods
+def scaling_family_diagram():
+    """PI, NTK-aware and YaRN as three edits to the same ladder."""
+    sc = PI_SCALE
+    b = txt(340, 24, "Three ways to stretch the same ladder", 13, PRI, "middle", "500")
+    b += txt(340, 44, f"wavelength in tokens, d_h = 64, base 10000 \u2192 "
+             f"{sc}\u00d7 context", 11, SEC, "middle")
+
+    cols = [(64, 60, "pair"), (128, 108, "plain"), (240, 108, f"PI \u00d7{sc}"),
+            (352, 108, "NTK-aware"), (464, 156, "what NTK did to it")]
+    y = 82
+    for x, w, lab in cols:
+        b += vcell(x, y, w, 24, "gray", lab, size=10, weight="500")
+
+    for i, pr in enumerate(PI_PAIRS):
+        yy = y + 27 + i * 27
+        lam, ntk = PI_LAM[i], PI_LAM_NTK[i]
+        ratio = ntk / lam
+        b += vcell(64, yy, 60, 24, "gray", f"{pr}", size=9.5)
+        b += vcell(128, yy, 108, 24, "gray", f"{lam:,.0f}" if lam >= 100
+                   else f"{lam:.1f}", size=9.5)
+        b += vcell(240, yy, 108, 24, "coral", f"{lam * sc:,.0f}" if lam * sc >= 100
+                   else f"{lam * sc:.1f}", size=9.5)
+        b += vcell(352, yy, 108, 24, "teal", f"{ntk:,.0f}" if ntk >= 100
+                   else f"{ntk:.1f}", size=9.5)
+        bw = 96 * (ratio - 1) / (sc - 1)
+        b += (f'<rect x="{470}" y="{yy + 5}" width="{max(bw, 1.5)}" height="14" '
+              f'rx="2" fill="{RAMP["teal"][1]}" opacity="0.8"/>')
+        b += txt(470 + max(bw, 1.5) + 6, yy + 12, f"\u00d7{ratio:.2f}", 9,
+                 RAMP["teal"][2], "start")
+
+    yy = y + 27 + len(PI_PAIRS) * 27 + 20
+    b += txt(340, yy, "PI multiplies every wavelength by 4, including pair 0's six "
+             "tokens.", 12, PRI, "middle", "500")
+    b += txt(340, yy + 20, "NTK-aware raises the BASE instead (10000 \u2192 41829), "
+             "which leaves the fast", 11, SEC, "middle")
+    b += txt(340, yy + 38, "pairs almost untouched and puts the whole stretch on the "
+             "slow ones \u2014 exactly", 11, SEC, "middle")
+    b += txt(340, yy + 56, "where a 4\u00d7 context needs it.", 11, SEC, "middle")
+
+    y2 = yy + 88
+    items = [("PI", "m \u2192 m / s",
+              "all pairs alike; needs fine-tuning"),
+             ("NTK-aware", "base \u2192 base\u00b7s^(d/(d\u22122))",
+              "fast pairs kept; often no fine-tuning"),
+             ("YaRN", "ramp per pair + attn temperature",
+              "the current 64k\u2013128k answer")]
+    for i, (name, formula, note) in enumerate(items):
+        yy2 = y2 + i * 40
+        b += vcell(48, yy2, 92, 26, PAIR_RAMP[i], name, size=10, weight="500")
+        b += vcell(146, yy2, 214, 26, "gray", formula, size=9.5)
+        b += txt(370, yy2 + 13, note, 9.5, SEC, "start")
+
+    y3 = y2 + len(items) * 40 + 14
+    b += txt(340, y3, "All three change one thing: what angle position m gets. "
+             "Not the attention", 11, PRI, "middle", "500")
+    b += txt(340, y3 + 18, "formula, not a weight shape, not a single parameter "
+             "count \u2014 the same kind of", 11, SEC, "middle")
+    b += txt(340, y3 + 36, "single-slot intervention MoE makes to the FFN.",
+             11, SEC, "middle")
+    return wrap(680, y3 + 64, "PI, NTK-aware and YaRN",
+                "What each method does to the wavelength ladder of a 64-wide head.",
+                b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1100,6 +1296,9 @@ DIAGRAMS = {
     "56_rope_conventions.svg": conventions_diagram,
     "57_rotate_half.svg": rotate_half_diagram,
     "58_convention_swap.svg": convention_swap_diagram,
+    "60_pi_positions.svg": pi_positions_diagram,
+    "61_pi_tradeoff.svg": pi_tradeoff_diagram,
+    "62_scaling_family.svg": scaling_family_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
