@@ -380,10 +380,6 @@ class CausalSelfAttention(nn.Module):
         self.v_proj = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.d_head, bias=False)
         self.o_proj = nn.Linear(cfg.n_heads * cfg.d_head, cfg.d_model, bias=False)
 
-    def _split(self, t, n):
-        B, T, _ = t.shape
-        return t.view(B, T, n, self.d_head).transpose(1, 2)  # (B, n, T, dh)
-
     def forward(self, x, cos, sin, cache=None):
         """x: (B, T, d) -> (B, T, d).
 
@@ -392,9 +388,9 @@ class CausalSelfAttention(nn.Module):
         """
         B, T, d = x.shape
 
-        q = self._split(self.q_proj(x), self.n_heads)        # (B, H,   T, dh)
-        k = self._split(self.k_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
-        v = self._split(self.v_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
+        q = split_heads(self.q_proj(x), self.n_heads)        # (B, H,   T, dh)
+        k = split_heads(self.k_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
+        v = split_heads(self.v_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
 
         # RoPE goes on q and k only. v carries content, not position - rotating
         # it would rotate the thing being retrieved instead of the address.
@@ -414,21 +410,12 @@ class CausalSelfAttention(nn.Module):
             k = k.repeat_interleave(self.n_rep, dim=1)       # (B, H, S, dh)
             v = v.repeat_interleave(self.n_rep, dim=1)
 
-        n_keys = k.shape[2]                                  # keys available
-        att = (q @ k.transpose(-1, -2)) / self.d_head ** 0.5  # (B, H, T, n_keys)  E9
-
-        # E9's mask: M_mn = 0 for n <= m, -inf for n > m, with m the query
-        # position and n the key position. Query row i is the (n_keys-T+i)-th
-        # token overall, so with a cache (T=1) the single row is all-visible -
-        # that offset is what makes one line correct in training AND generation.
-        m = torch.arange(n_keys - T, n_keys, device=x.device)[:, None]   # (T, 1)
-        n = torch.arange(n_keys, device=x.device)[None, :]               # (1, n_keys)
-        att = att.masked_fill(n > m, float("-inf"))
-
-        p = att.softmax(dim=-1)                              # (B, H, T, n_keys)  E10
-        y = p @ v                                            # (B, H, T, d_h)  head_h
-        y = y.transpose(1, 2).reshape(B, T, self.n_heads * self.d_head)
-        return self.o_proj(y)                                # (B, T, d)  E11
+        # Scale, mask, softmax, weighted sum - the same three lines the 2017
+        # layer runs, and the same function. The mask's (S - T) offset is what
+        # makes it correct here with a cache (T = 1, S = everything so far) as
+        # well as in training, where S == T.
+        y = scaled_dot_product(q, k, v, causal=True)         # E9, E10
+        return self.o_proj(merge_heads(y))                   # (B, T, d)  E11
 
 
 # ------------------------------------------------- attention, the 2017 version
