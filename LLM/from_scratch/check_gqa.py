@@ -12,8 +12,9 @@ isn't right. It says WHAT is wrong and usually WHY, never the answer.
     3  kv_cache_floats_per_token   the accounting the whole thing is for
 
 The reference values come from `../common.py`'s CausalSelfAttention run with an
-identity rotation, which is exactly this layer. They include the output of the
-one wrong grouping that has the right shape, so the grader can name it.
+identity rotation (cos = 1, sin = 0), which makes apply_rope a no-op - so what
+is left is exactly this layer. They include the output of the one wrong
+grouping that has the right shape, so the grader can name it.
 """
 
 import sys

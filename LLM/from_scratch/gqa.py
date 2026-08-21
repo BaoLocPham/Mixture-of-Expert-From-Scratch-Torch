@@ -26,8 +26,11 @@ Notation follows "The equations - with and without MoE":
     n_rep        n_h / n_kv, the group size
     head h reads kv group floor(h / n_rep)                          E11
 
-`../common.py` is the finished version; opening it before you are done costs
-you the exercise.
+`../common.py` is the finished version of all three: `repeat_kv` and
+`kv_cache_floats_per_token` are there by name, and `GroupedQueryAttention` is
+`CausalSelfAttention` with the rotation switched off - there is no separate
+class for it, because GQA and RoPE are independent and the model wants both.
+Opening any of that before you are done costs you the exercise.
 """
 
 import torch

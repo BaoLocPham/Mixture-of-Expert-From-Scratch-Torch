@@ -42,7 +42,8 @@ if SCRATCH:
 else:
     sys.path.insert(0, str(_here))
     from common import (LLMConfig, LLM, rope_tables, apply_rope, build,
-                        CausalSelfAttention, VanillaSelfAttention, sinusoidal_pe)
+                        CausalSelfAttention, VanillaSelfAttention,
+                        sinusoidal_pe, kv_cache_floats_per_token)
 
 torch.manual_seed(0)
 torch.set_printoptions(precision=4, sci_mode=False)
@@ -125,8 +126,8 @@ print("so recomputing them is pure waste - but the *mask* has to know that the")
 print("single query row sits at the END of the keys, which is the offset bug")
 print("everyone writes once.")
 
-kv_full = 2 * cfg.n_layers * cfg.n_heads * cfg.d_head
-kv_gqa = 2 * cfg.n_layers * cfg.n_kv_heads * cfg.d_head
+kv_full = kv_cache_floats_per_token(cfg.n_layers, cfg.n_heads, cfg.d_head)
+kv_gqa = kv_cache_floats_per_token(cfg.n_layers, cfg.n_kv_heads, cfg.d_head)
 print(f"\nKV cache, floats per token: MHA would be {kv_full}, this GQA model keeps "
       f"{kv_gqa}")
 print(f"  {cfg.n_heads} query heads share {cfg.n_kv_heads} kv heads "
@@ -163,8 +164,8 @@ if not SCRATCH:
     print(f"    of which  wider k and v {n_kv_extra:,}   biases {n_bias:,}"
           f"   {'(they agree)' if n_kv_extra + n_bias == p_van - p_rope else '(MISMATCH)'}")
 
-    kv_rope = 2 * cfg.n_layers * cfg.n_kv_heads * cfg.d_head
-    kv_van = 2 * cfg.n_layers * cfg.n_heads * cfg.d_head
+    kv_rope = kv_cache_floats_per_token(cfg.n_layers, cfg.n_kv_heads, cfg.d_head)
+    kv_van = kv_cache_floats_per_token(cfg.n_layers, cfg.n_heads, cfg.d_head)
     print(f"  KV floats/token rope {kv_rope:<9,} vanilla {kv_van:<9,} "
           f"({kv_van / kv_rope:.0f}x - the whole of GQA, and the reason it exists)")
     print(f"  position table  rope cos/sin {tuple(model.cos.shape)} x2, read every "

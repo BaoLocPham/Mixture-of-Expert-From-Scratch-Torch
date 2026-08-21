@@ -325,6 +325,52 @@ def merge_heads(t):
     return t.transpose(1, 2).reshape(B, T, n_heads * d_head)
 
 
+def repeat_kv(t, n_rep):
+    r"""(B, n_kv, S, d_h) -> (B, n_kv * n_rep, S, d_h). E11's grouping.
+
+    One kv head serves n_rep query heads, and the scores are a single batched
+    matmul over the head axis, so the kv side has to be widened to match before
+    it runs. Query head h reads kv group
+
+        floor(h / n_rep)
+
+    which is FLOOR division, so the groups have to come out CONTIGUOUS: kv head
+    0 becomes output heads 0 .. n_rep-1, and so on. `repeat_interleave` does
+    that; `repeat` tiles the whole tensor instead and gives h mod n_kv - a
+    different assignment of query heads to kv heads, with the same shape, no
+    error, and no checkpoint that matches it.
+
+    HuggingFace's `repeat_kv` takes a third route to the same order: insert an
+    axis of length n_rep INSIDE the head axis, expand along it, then fold it
+    back in with reshape. Because the new axis sits inside the kv-head axis the
+    groups land contiguous either way.
+
+    Note where this is NOT called from: before the cache. The cache holds n_kv
+    heads and this expansion is a transient - putting it earlier would store
+    n_h heads and throw away the whole saving while changing no output.
+    """
+    if n_rep == 1:
+        return t
+    return t.repeat_interleave(n_rep, dim=1)
+
+
+def kv_cache_floats_per_token(n_layers, n_kv_heads, d_head):
+    r"""How many floats the KV cache holds per token of context - E40.
+
+        2 * n_layers * n_kv * d_h
+
+    The 2 is k and v. What is absent is n_h: queries are consumed the moment
+    the scores are computed and never stored, which is exactly why sharing the
+    kv side is an acceptable trade - the model keeps every attention pattern it
+    had and only the stored half shrinks.
+
+    What it also does not shrink is FLOPs. `repeat_kv` puts k and v back at
+    full width before the matmul, so the arithmetic costs what MHA costs. GQA
+    buys memory and bandwidth, not compute.
+    """
+    return 2 * n_layers * n_kv_heads * d_head
+
+
 def scaled_dot_product(q, k, v, causal=True):
     r"""E9 and E10, on already-split heads. Steps 3 to 5 of the layer.
 
@@ -467,12 +513,10 @@ class CausalSelfAttention(nn.Module):
                 v = torch.cat([cache["v"], v], dim=2)
             cache["k"], cache["v"] = k, v
 
-        # One kv head serves n_rep query heads: repeat it so the einsum lines up.
-        # repeat_interleave, not repeat - head h of the q side must land next to
-        # its own group, and repeat would interleave the groups wrongly.
-        if self.n_rep > 1:
-            k = k.repeat_interleave(self.n_rep, dim=1)       # (B, H, S, dh)
-            v = v.repeat_interleave(self.n_rep, dim=1)
+        # One kv head serves n_rep query heads: widen so the matmul lines up.
+        # AFTER the cache, deliberately - see repeat_kv's docstring.
+        k = repeat_kv(k, self.n_rep)                         # (B, H, S, dh)
+        v = repeat_kv(v, self.n_rep)
 
         # Scale, mask, softmax, weighted sum - the same three lines the 2017
         # layer runs, and the same function. The mask's (S - T) offset is what
