@@ -21,6 +21,10 @@ rather than something to build. What you build here is the full one.
 The FFN and the MoE layer are imported ready-made below. You built those in
 DenseMoe/from_scratch and SparseMoe/from_scratch; this exercise is the
 transformer they sit inside.
+
+`split_heads`, `merge_heads` and `scaled_dot_product` come in ready-made too.
+You built those in attention.py, and they are the 2017 layer unchanged - so
+stage 3 here is only what a modern layer adds on top of it.
 """
 
 import sys
@@ -32,7 +36,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import FeedForward, MoEFeedForward, switch_aux_loss     # noqa: F401
+from common import (FeedForward, MoEFeedForward, switch_aux_loss,   # noqa: F401
+                    split_heads, merge_heads, scaled_dot_product)
 
 
 @dataclass
@@ -132,30 +137,43 @@ def apply_rope(x, cos, sin):
 
 # -------------------------------------------------------- stage 3: attention
 class CausalSelfAttention(nn.Module):
-    """E6, E9-E11. Causal attention, grouped query heads, and a KV cache.
+    """E6, E9-E11 - the modern layer: grouped query heads, RoPE, a KV cache.
+
+    Three of the six steps arrive ready-made, imported at the top of this file:
+    `split_heads`, `scaled_dot_product` (the scale, the mask, the softmax and
+    the weighted sum, all four) and `merge_heads`. You built those in
+    attention.py, and they are unchanged here - E9 and E10 have not moved since
+    2017. What is left is exactly what a 2024 layer adds on top.
 
     TODO __init__:
       Four bias-free Linears: q, k, v, o. q and o are full width
       (n_heads * d_head); k and v are NARROWER when n_kv_heads < n_heads - that
-      asymmetry is the whole of GQA.
+      asymmetry is the whole of GQA. Keep n_rep = n_heads // n_kv_heads.
 
     TODO forward(x, cos, sin, cache=None):  (B, T, d) -> (B, T, d)
-      1. project, then split the width into heads -> (B, heads, T, d_head)
-      2. rotate q and k. NOT v: position belongs on the address, not the payload
-      3. if cache is given, concatenate the stored k/v in front of the new ones
-         and store the result back
-      4. make each kv head serve its group of q heads. The q head order is
-         fixed, so the expansion has to keep each group contiguous
-      5. scores = q @ k^T / sqrt(d_h)   (E9)
-      6. mask out the future, THEN softmax. E9's M is 0 where n <= m and -inf
-         where n > m, with m the query position and n the key position. With a cache the query rows sit at the END of the key
-         range - a mask written as a plain lower triangle is correct while
-         training and silently wrong while generating
-      7. weighted sum of v, merge the heads back to width d, project with o
+      1. project and split. `split_heads(self.q_proj(x), self.n_heads)`, and
+         the same for k and v with self.n_kv_heads. Two different head counts
+         on purpose - that is the line GQA changes.
+      2. rotate q and k with apply_rope. NOT v: position belongs on the
+         address, not on the payload being retrieved.
+      3. if `cache` is given, concatenate the stored k/v in FRONT of the new
+         ones along the token axis, and store the result back.
+      4. make each kv head serve its group of q heads. Query head h must read
+         kv head floor(h / n_rep), so the expansion has to keep each group
+         CONTIGUOUS - one of torch's two repeat functions does that and the
+         other silently does not.
+      5. `scaled_dot_product(q, k, v, causal=True)`, then `merge_heads`, then
+         o_proj.
 
-    Why softmax after masking and not before: -inf goes to exactly 0, and the
-    surviving weights renormalise. Zeroing after a softmax would leave the rows
-    summing to less than 1.
+    Steps 2, 3 and 4 are the entire diff against the 2017 layer; step 1 differs
+    by one argument. Everything else is the same code, which is the point.
+
+    Order matters twice in the middle, and neither mistake raises:
+      - step 2 goes BEFORE step 3, so what lands in the cache is already
+        rotated and the cached path needs no position bookkeeping at all.
+      - step 4 goes AFTER step 3, so the cache holds n_kv heads and only the
+        transient copy is full width. Do it before and you cache n_h heads,
+        which throws away the entire reason GQA exists.
     """
 
     def __init__(self, cfg: LLMConfig):

@@ -71,6 +71,12 @@ the FFN and the routed FFN are imported here already built, because you built
 them there. (The FFN you import is the three-matrix SwiGLU of E18, not the
 two-matrix expert those tracks used; the routing around it is unchanged.)
 
+Do **`attention.py`** first as well. `split_heads`, `merge_heads` and
+`scaled_dot_product` are imported here ready-made for the same reason: they are
+the 2017 layer, you build them there, and E9/E10 have not changed since. That
+leaves stage 3 below as *only* what a modern layer adds on top — which is four
+lines, not seven.
+
 Every stub cites the equation it implements, using the E1–E43 numbering from
 the notes, so you can read the stub and the maths side by side.
 
@@ -86,7 +92,7 @@ the point of it.
 |---|------|----------|
 | 1 | `RMSNorm` (E4) | Scale, don't centre. Two lines, and one of them has a trap in it. |
 | 2 | `rope_tables`, `apply_rope` (E7, E8) | Position as a rotation. The dot product must end up seeing only `n - m`. |
-| 3 | `CausalSelfAttention` (E6, E9–E11) | Heads, GQA, the mask, the cache. **The hard one.** |
+| 3 | `CausalSelfAttention` (E6, E9–E11) | What a *modern* layer adds: narrower k/v, RoPE on q and k, the cache, and the kv expansion. The 2017 middle is imported. |
 | 4 | `Block` (E14, E15) | Pre-norm and two residuals. Easy to write, easy to write backwards. |
 | 5 | `LLM` (E1, E32, E24/E29) | Tying, buffers, the loss, and `pos`. |
 | 6 | `generate` (E33) | Sampling, and a cache that must not change the answer. |

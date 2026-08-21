@@ -203,11 +203,13 @@ def stage_3():
 
     for bad, msg, hint in (
         (ATT_NOMASK, "the future is not masked",
-         "Every position can see every other one. Mask BEFORE the softmax, and "
-         "let -inf do the work."),
+         "Every position can see every other one. If you called "
+         "scaled_dot_product you passed causal=False; if you hand-rolled the "
+         "middle instead, mask BEFORE the softmax and let -inf do the work."),
         (ATT_NOSCALE, "the scores are not scaled",
-         "Divide by sqrt(d_head). Without it the score scale grows with head "
-         "width and the softmax saturates."),
+         "You hand-rolled the scale/mask/softmax instead of calling "
+         "scaled_dot_product, and dropped the 1/sqrt(d_head). Without it the "
+         "score scale grows with head width and the softmax saturates."),
         (ATT_NOROPE, "position never entered",
          "q and k have to be rotated. Without it the layer is permutation "
          "invariant - it cannot tell 'a b' from 'b a'."),
@@ -215,9 +217,10 @@ def stage_3():
         if close(out, bad):
             raise Fail(msg, hint)
     need(close(out, ATT_OUT), "wrong values",
-         "Work outwards: heads split, rotation, mask, softmax, weighted sum, "
-         "merge, project. Print the (B, H, T, S) score tensor and look at row 0 "
-         "- it should be exactly one 1.0 and the rest zeros.")
+         "Five steps: split (two different head counts), rotate q and k, cache, "
+         "expand the kv heads, then scaled_dot_product -> merge_heads -> "
+         "o_proj. If the shapes all line up, suspect the two orderings: the "
+         "rotation goes before the cache, the expansion after it.")
 
     edited = X.clone()
     edited[:, -1] += 3.0
