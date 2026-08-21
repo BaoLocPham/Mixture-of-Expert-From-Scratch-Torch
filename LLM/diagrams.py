@@ -1805,6 +1805,84 @@ def mask_why_diagram():
                 "difference costs.", b)
 
 
+# ------------------------------------------------ 69. where repeat_kv belongs
+def repeat_kv_order_diagram():
+    """The one GQA ordering that has no shape signal and no value signal."""
+    b = txt(340, 24, "Where repeat_kv goes, and what it costs to get wrong",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, "both orders produce the same output, the same shapes, "
+             "and no error", 11, SEC, "middle")
+
+    CW, CH, G = 116, 30, 12
+
+    def pipeline(y, label, boxes, ramp):
+        g = txt(48, y - 14, label, 11, RAMP[ramp][2], "start", "500")
+        x = 48
+        for i, (name, sub, hot) in enumerate(boxes):
+            r = ramp if hot else "gray"
+            g += vcell(x, y, CW, CH, r, name, size=9.5,
+                       weight="500" if hot else "normal")
+            g += txt(x + CW / 2, y + CH + 11, sub, 8.5,
+                     RAMP[r][2] if hot else SEC, "middle")
+            if i < len(boxes) - 1:
+                g += arrow(x + CW + 1, y + CH / 2, x + CW + G - 1, y + CH / 2)
+            x += CW + G
+        return g
+
+    y1 = 96
+    b += pipeline(y1, "expand AFTER the cache", [
+        ("split", "q 4  \u00b7  k,v 2", False),
+        ("cache", "stores 2 heads", True),
+        ("repeat_kv", "2 \u2192 4, transient", False),
+        ("scores", "4 heads", False)], "teal")
+
+    y2 = 200
+    b += pipeline(y2, "expand BEFORE the cache", [
+        ("split", "q 4  \u00b7  k,v 2", False),
+        ("repeat_kv", "2 \u2192 4", False),
+        ("cache", "stores 4 heads", True),
+        ("scores", "4 heads", False)], "coral")
+
+    y3 = 268
+    b += txt(340, y3, "The only difference is the width of one stored tensor.",
+             12, PRI, "middle", "500")
+    b += txt(340, y3 + 20, "Every output is identical, every shape is "
+             "identical, nothing raises \u2014 and the second", 11, SEC, "middle")
+    b += txt(340, y3 + 38, "one has thrown away the entire reason GQA exists.",
+             11, SEC, "middle")
+
+    y4 = y3 + 66
+    b += txt(340, y4, "32 layers, 32 query heads, 8 kv heads, d_head 128",
+             11.5, PRI, "middle", "500")
+    rows = [("cache stores n_kv = 8", "65,536", "34.4 GB", "teal"),
+            ("cache stores n_h = 32", "262,144", "137.4 GB", "coral")]
+    b += vcell(120, y4 + 22, 232, 24, "gray", "", size=9.5)
+    b += txt(236, y4 + 34, "what the cache holds", 9.5, SEC, "middle")
+    b += vcell(356, y4 + 22, 110, 24, "gray", "floats/token", size=9.5)
+    b += vcell(470, y4 + 22, 114, 24, "gray", "at 8k \u00d7 32, fp16", size=9.5)
+    for i, (lab, f_, gb, ramp) in enumerate(rows):
+        yy = y4 + 49 + i * 27
+        b += vcell(120, yy, 232, 24, ramp, lab, size=9.5)
+        b += vcell(356, yy, 110, 24, ramp, f_, size=9.5)
+        b += vcell(470, yy, 114, 24, ramp, gb, size=9.5)
+
+    y5 = y4 + 49 + len(rows) * 27 + 18
+    b += txt(340, y5, "That second row is the MHA number. Expanding early does "
+             "not make the cache", 11.5, PRI, "middle", "500")
+    b += txt(340, y5 + 18, "somewhat bigger \u2014 it makes it exactly the size "
+             "it would have been with no", 11, SEC, "middle")
+    b += txt(340, y5 + 36, "grouping at all, while the model still pays for the "
+             "narrower k and v.", 11, SEC, "middle")
+    b += txt(340, y5 + 62, "check_gqa.py stage 2 is the only test here that "
+             "catches it, and it does not", 10.5, RAMP["purple"][2], "middle",
+             "500")
+    b += txt(340, y5 + 80, "compare values \u2014 it reads cache[\"k\"].shape[1].",
+             10.5, RAMP["purple"][2], "middle")
+    return wrap(680, y5 + 108, "Where repeat_kv belongs",
+                "Expanding the kv heads before or after the cache: same output, "
+                "twice the memory.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1828,6 +1906,7 @@ DIAGRAMS = {
     "66_two_attentions.svg": two_attentions_diagram,
     "67_three_codebases.svg": three_codebases_diagram,
     "68_mask_why.svg": mask_why_diagram,
+    "69_repeat_kv_order.svg": repeat_kv_order_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
