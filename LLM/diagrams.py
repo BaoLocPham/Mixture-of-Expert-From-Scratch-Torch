@@ -648,7 +648,7 @@ def mask_diagram():
              "normalised. Zeroing afterwards", 11, SEC, "middle")
     b += txt(340, yy + 64, "would leave each row summing to less than 1 — a quiet "
              "rescaling of every token.", 11, SEC, "middle")
-    b += txt(340, yy + 90, "This triangle is also the whole reason one forward pass "
+    b += txt(340, yy + 105, "This triangle is also the whole reason one forward pass "
              "over T tokens yields T", 11, PRI, "middle", "500")
     b += txt(340, yy + 108, "training signals instead of one.", 11, PRI, "middle", "500")
     return wrap(680, yy + 134, "The causal mask",
@@ -866,7 +866,7 @@ def split_transpose_diagram():
              "contract d_h and keep T \u2014 so", 11, SEC, "middle")
     b += txt(340, yy + 36, "(T, d_h) must be last, and the head axis must be in front "
              "with the batch.", 11, SEC, "middle")
-    b += txt(340, yy + 58, "One transpose buys all n_h head-attentions as a single "
+    b += txt(340, yy + 73, "One transpose buys all n_h head-attentions as a single "
              "batched matmul.", 11, SEC, "middle")
 
     b += txt(340, yy + 88, "transpose returns a non-contiguous view, which is why the "
@@ -1612,6 +1612,87 @@ def two_attentions_diagram():
                 "in seven years.", b)
 
 
+# ------------------------------------ 67. the same steps in three codebases
+def three_codebases_diagram():
+    """Our two layers and HuggingFace's LlamaAttention, line for line."""
+    b = txt(340, 24, "The same steps, three codebases", 13, PRI, "middle", "500")
+    b += txt(340, 44, "LLM/common.py \u00d7 2, and transformers/models/llama/"
+             "modeling_llama.py", 11, SEC, "middle")
+
+    x0, CW, G = 104, 184, 4
+    cols = [("2017  \u00b7  Vanilla", "coral"),
+            ("ours  \u00b7  Causal", "teal"),
+            ("HF  \u00b7  LlamaAttention", "purple")]
+    for i, (lab, ramp) in enumerate(cols):
+        b += vcell(x0 + i * (CW + G), 70, CW, 24, ramp, lab, size=9.5, weight="500")
+
+    rows = [
+        ("project", "Linear(d, d,\nbias=True)", "Linear(d, n_h\u00b7d_h,\nbias=False)",
+         "Linear(hidden, n_h\u00b7head_dim,\nbias=config.attention_bias)"),
+        ("split", "split_heads(t, n_h)", "split_heads(t, n_h)",
+         ".view(hidden_shape)\n.transpose(1, 2)"),
+        ("position", "added to the\nembedding, upstream", "apply_rope(q, cos, sin)\ninterleaved pairs",
+         "apply_rotary_pos_emb(\nq, k, cos, sin)  split-half"),
+        ("cache", "dict + torch.cat", "dict + torch.cat",
+         "past_key_values.update(\nk, v, self.layer_idx)"),
+        ("kv expand", "\u2014  every head has\nits own k, v",
+         "k.repeat_interleave(\nn_rep, dim=1)",
+         "repeat_kv(k, groups)\nexpand + reshape"),
+        ("scale", "/ d_head ** 0.5", "/ d_head ** 0.5",
+         "* self.scaling\nhead_dim ** -0.5"),
+        ("mask", "masked_fill(\nn > m, -inf)", "masked_fill(\nn > m, -inf)",
+         "attn_weights\n+ attention_mask"),
+        ("softmax", "att.softmax(-1)", "att.softmax(-1)",
+         "softmax(dtype=float32)\n.to(query.dtype)"),
+        ("dropout", "\u2014", "\u2014",
+         "dropout(p=config.\nattention_dropout)"),
+        ("merge", "merge_heads(y)", "merge_heads(y)",
+         ".transpose(1,2).contiguous()\n.reshape(*input_shape, -1)"),
+    ]
+    y = 100
+    for name, a_, b_, c_ in rows:
+        two = any("\n" in t for t in (a_, b_, c_))
+        h = 32 if two else 22
+        b += txt(x0 - 10, y + h / 2, name, 9, PRI, "end", "500")
+        for i, (lab, (_, ramp)) in enumerate(zip((a_, b_, c_), cols)):
+            xx = x0 + i * (CW + G)
+            same = i == 1 and lab == a_
+            parts = lab.split("\n")
+            b += vcell(xx, y, CW, h, "gray" if same else ramp,
+                       "" if len(parts) > 1 else lab, size=8, op=0.6 if same else 1.0)
+            if len(parts) > 1:
+                col = RAMP["gray" if same else ramp][2]
+                for j, pt in enumerate(parts):
+                    b += txt(xx + CW / 2, y + h / 2 - 6.5 + j * 13, pt, 8, col,
+                             "middle")
+        y += h + 4
+
+    yy = y + 14
+    b += txt(340, yy, "Grey means \u201cidentical to the column on its "
+             "left\u201d. Neither of ours has dropout;", 11, SEC, "middle")
+    b += txt(340, yy + 15, "the paper does, at p = 0.1, and it is the one paper "
+             "feature this track leaves out.", 11, SEC, "middle")
+    b += txt(340, yy + 37, "Every difference in the right-hand column is a "
+             "spelling, not an idea:", 12, PRI, "middle", "500")
+    b += txt(340, yy + 57, "multiply by a precomputed reciprocal instead of "
+             "dividing; add a mask tensor the", 10.5, SEC, "middle")
+    b += txt(340, yy + 58, "model built once instead of masked_fill per layer; "
+             "expand + reshape instead of", 10.5, SEC, "middle")
+    b += txt(340, yy + 89, "repeat_interleave; a Cache object instead of a dict. "
+             "E9 and E10 are the same", 10.5, SEC, "middle")
+    b += txt(340, yy + 90, "four operations in all three.", 10.5, SEC, "middle")
+
+    b += txt(340, yy + 131, "The two that are more than spelling: HF does the "
+             "softmax in float32 and casts", 11, RAMP["coral"][2], "middle", "500")
+    b += txt(340, yy + 147, "back (bf16 conditioning, which this fp32 track does "
+             "not need), and it keeps the", 10.5, RAMP["coral"][2], "middle")
+    b += txt(340, yy + 163, "paper's dropout on the attention weights.",
+             10.5, RAMP["coral"][2], "middle")
+    return wrap(680, yy + 191, "Three implementations of one layer",
+                "Our vanilla and modern layers beside HuggingFace's "
+                "LlamaAttention, step by step.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1633,6 +1714,7 @@ DIAGRAMS = {
     "64_rope_half_cat.svg": rope_half_cat_diagram,
     "65_rope_half_trace.svg": rope_half_trace_diagram,
     "66_two_attentions.svg": two_attentions_diagram,
+    "67_three_codebases.svg": three_codebases_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
