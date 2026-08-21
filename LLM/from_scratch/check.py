@@ -6,6 +6,18 @@ Grader for llm.py.
 Runs the six stages in order and stops at the first one that isn't done or
 isn't right. It says WHAT is wrong and usually WHY, never the answer.
 
+The stages are llm.py's, in the same order, which is the order the forward
+pass runs - so each one is checked before the next one needs it:
+
+    1  RMSNorm       normalises, keeps the mean, survives a zero row
+    2  rope_tables   right frequencies, length-preserving, and E8: the dot
+       apply_rope    product must depend only on n - m
+    3  CausalSelfAttention  GQA-shaped, causal, and the cached path must agree
+                     with one full pass
+    4  Block         pre-norm, and both residuals actually present
+    5  LLM           tying, the loss, and `pos`
+    6  generate      sampling, and a cache that does not change the answer
+
 The numbers baked in below are outputs, including the outputs of several
 specific WRONG implementations - so the grader can tell you which mistake you
 made. Reading them tells you nothing about how to produce them.
@@ -24,7 +36,7 @@ import llm as sol
 
 torch.set_printoptions(precision=6, sci_mode=False)
 
-# ---------------------------------------------------------------- fixtures
+# ------------------------------------------- the fixtures every stage shares
 D, H, HKV, DH, D_FF, V, LAYERS, MAXSEQ = 8, 2, 1, 4, 16, 10, 2, 12
 T = 5
 IDS = torch.tensor([[3, 1, 7, 0, 5]])
@@ -95,7 +107,7 @@ def want_names(module, expected, what):
                    "list is in the docstring at the top of llm.py.")
 
 
-# ------------------------------------------------------- expected (outputs)
+# --------------------------------- expected outputs - values only, no method
 NORM_OUT = None
 NORM_LAYERNORM = None
 ROPE_COS0 = None
@@ -115,7 +127,7 @@ GEN = None
 exec(open(Path(__file__).with_name("expected.py")).read())
 
 
-# ------------------------------------------------------------------ stages
+# ------------------------------ stage 1: norm - the first thing a block does
 def stage_1():
     n = sol.RMSNorm(D)
     want_names(n, ["weight"], "RMSNorm")
@@ -145,6 +157,7 @@ def stage_1():
     return "RMSNorm: normalises, keeps the mean, survives a zero row"
 
 
+# ---------------------------- stage 2: position - the tables attention reads
 def stage_2():
     cos, sin = call(sol.rope_tables, DH, MAXSEQ)
     need(cos.shape == (MAXSEQ, DH // 2),
@@ -186,6 +199,7 @@ def stage_2():
     return "rope: right frequencies, length-preserving, sees only n - m"
 
 
+# ----------------- stage 3: attention - the only place tokens see each other
 def stage_3():
     c = cfg()
     at = fix(sol.CausalSelfAttention(c))
@@ -240,6 +254,7 @@ def stage_3():
     return "attention: masked, scaled, rotated, GQA-shaped, cache-consistent"
 
 
+# --------------------------------------------- stage 4: the block - E14, E15
 def stage_4():
     b = fix(sol.Block(cfg()))
     cos, sin = sol.rope_tables(DH, MAXSEQ)
@@ -275,6 +290,7 @@ def stage_4():
     return "block: pre-norm, residual, passes the aux loss up"
 
 
+# ----------------------------------------- stage 5: the model - E1, E24, E32
 def stage_5():
     m = fix(sol.LLM(cfg()))
     need(hasattr(m, "cos") and hasattr(m, "sin"), "the model needs cos/sin buffers")
@@ -317,6 +333,7 @@ def stage_5():
     return "model: tied, buffered, correct loss, cache-consistent"
 
 
+# --------------------------------------------------- stage 6: generate - E33
 def stage_6():
     m = fix(sol.LLM(cfg()))
     prompt = IDS[:, :3]
@@ -352,6 +369,7 @@ def stage_6():
     return "generate: cached == uncached, top_k restricts, prompt preserved"
 
 
+# ---------------------------------------------------------------- the runner
 STAGES = [
     (1, "RMSNorm", stage_1),
     (2, "rope_tables + apply_rope", stage_2),
