@@ -24,7 +24,7 @@ Ten steps:
   7. ffn         - the dense branch, then the routed one          (E18, E19-E21)
   8. logits      - tied head = dot product with the embedding rows (E32)
   9. loss        - the shift by one, and cross-entropy by hand    (E24)
- 10. real model  - the same numbers out of TinyLLM, dense vs MoE
+ 10. real model  - the same numbers out of LLM, dense vs MoE
 """
 
 import sys
@@ -35,7 +35,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (LLMConfig, RMSNorm, CausalSelfAttention, FeedForward,
-                    MoEFeedForward, TinyLLM, rope_tables, apply_rope, build)
+                    MoEFeedForward, LLM, rope_tables, apply_rope, build)
 
 torch.manual_seed(0)
 torch.set_printoptions(precision=4, sci_mode=False)
@@ -395,7 +395,7 @@ print("averaged - and exp(loss) is the perplexity everyone quotes.")
 
 
 # ------------------------------------------------------------- 10. the model
-hdr("10. the same thing, from TinyLLM")
+hdr("10. the same thing, from LLM")
 
 torch.manual_seed(0)
 real_ids = torch.randint(0, 32, (1, 6))

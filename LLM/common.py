@@ -4,6 +4,12 @@ in one sitting, built from the same parts every modern LLM is built from.
 
     embed -> [ RMSNorm -> attention -> + ] [ RMSNorm -> FFN -> + ] x L -> RMSNorm -> logits
 
+Two models, on purpose. `TinyLLM` is that line and nothing else - no switches,
+no cache, no sampling - and is the one to read first. `LLM` is the same model
+with the four things a real one needs: the attention switch, the FFN switch,
+weight tying, and incremental decoding. Everything that prints a number uses
+`LLM`.
+
 The FFN slot takes either a single feed-forward network (`ffn="dense"`) or a
 top-k mixture of them (`ffn="moe"`). Nothing else in the model changes.
 
@@ -709,7 +715,77 @@ class Block(nn.Module):
 
 # ------------------------------------------------------------------- model
 class TinyLLM(nn.Module):
-    """The whole model. Same class for both FFN kinds.
+    r"""A decoder-only language model, with nothing optional in it.
+
+        embed -> Block x L -> RMSNorm -> logits
+
+    That is the whole architecture. Fifteen lines of forward pass, no switches,
+    no cache, no sampling - so that the shape of a language model is readable
+    before any of the machinery around it is.
+
+    What it fixes, that `LLM` below lets you choose:
+
+        RoPE            position arrives inside each attention layer
+        a dense FFN     one MLP per block, not a routed mixture
+        no tying        W_u is its own matrix
+        no cache        every forward pass recomputes the whole prefix
+
+    Every one of those is a real decision and every one is priced somewhere in
+    run_llm.py. None of them changes what the model IS, which is why they are
+    not here.
+
+    The loss is E24, cross-entropy of the logits at position t against the
+    token at t+1 - and because of the causal mask, one forward pass over T
+    tokens supplies T of those, not one.
+    """
+
+    def __init__(self, cfg: LLMConfig):
+        super().__init__()
+        assert cfg.attn == "rope" and cfg.ffn == "dense", (
+            "TinyLLM is deliberately the fixed version: RoPE and a dense FFN. "
+            "For attn='vanilla' or ffn='moe', use LLM.")
+        self.cfg = cfg
+        self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)      # E1
+        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
+        self.norm = RMSNorm(cfg.d_model)
+        self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+
+        cos, sin = rope_tables(cfg.d_head, cfg.max_seq)   # buffers, not weights
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+    def forward(self, idx, targets=None):
+        """idx: (B, T) token ids -> logits (B, T, V), and the loss if asked."""
+        B, T = idx.shape
+        x = self.embed(idx)                                   # (B, T, d)
+        cos, sin = self.cos[:T], self.sin[:T]                 # rows 0 .. T-1
+
+        for blk in self.blocks:
+            x, _ = blk(x, cos, sin)                           # E14, E15
+
+        logits = self.lm_head(self.norm(x))                   # (B, T, V)  E32
+        if targets is None:
+            return logits
+        return logits, F.cross_entropy(                       # E24
+            logits.reshape(-1, self.cfg.vocab_size), targets.reshape(-1))
+
+
+class LLM(nn.Module):
+    """The configurable model: both attention layers, both FFN kinds, a KV
+    cache and sampling.
+
+    `TinyLLM` above is this class with every option removed. Read that one
+    first; this one is the same twelve lines plus four things a real model
+    needs and a first reading does not:
+
+        attn="rope" | "vanilla"   which attention layer, and so where position
+                                  enters - inside every block, or once at the
+                                  input via `sinusoidal_pe`
+        ffn="dense" | "moe"       the slot this whole repo is about
+        tie_embeddings            W_u = E^T                              E32
+        caches=, pos=, generate   incremental decoding, and the mask offset
+                                  that makes one line correct in training AND
+                                  generation
 
     E1 (embed) -> E14/E15 x L -> E32 (final norm and W_u) -> E33 (sampling).
 
@@ -901,4 +977,4 @@ class TinyLLM(nn.Module):
 
 def build(ffn="dense", **kw):
     """Shorthand used by the dissector: build(ffn="moe", n_experts=8, k=2)."""
-    return TinyLLM(LLMConfig(ffn=ffn, **kw))
+    return LLM(LLMConfig(ffn=ffn, **kw))

@@ -91,6 +91,12 @@ the point of it.
 | 5 | `TinyLLM` (E1, E32, E24/E29) | Tying, buffers, the loss, and `pos`. |
 | 6 | `generate` (E33) | Sampling, and a cache that must not change the answer. |
 
+> The `TinyLLM` you build here is the **full** model — switches, cache and
+> all — which the reference calls `LLM`. `common.py` keeps the name `TinyLLM`
+> for a stripped-down version of the same thing, with no options in it, as a
+> reading aid. Stages 5 and 6 are `LLM`; the grader addresses your class by
+> the name it already has.
+
 The grader knows several specific wrong implementations by their *output* and
 will name them:
 

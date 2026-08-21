@@ -52,6 +52,13 @@ the one *Attention Is All You Need* wrote — sinusoidal position added at the
 input, every query head with its own k and v, biases on all four projections —
 so the seven years between the two can be priced instead of argued about.
 
+There are two model classes, and the split is deliberate. **`TinyLLM`** is
+`embed → Block × L → norm → logits` and nothing else: no switches, no cache, no
+sampling, so the shape of a language model is readable before the machinery
+around it is. **`LLM`** is the same model with the four things a real one needs
+— the attention switch, the FFN switch, weight tying, and incremental decoding
+— and it is what every printed number in the track comes from.
+
 ## Notation
 
 The `LLM/` track follows one symbol table throughout — `d`, `d_h`, `d_ff`, `N`,
@@ -199,7 +206,8 @@ fighting the language-modelling objective.
 │       ├── sparse_moe.py
 │       └── check.py
 └── LLM/
-    ├── common.py               RMSNorm, RoPE, GQA and 2017 attention, blocks, TinyLLM
+    ├── common.py               RMSNorm, RoPE, both attention layers, blocks,
+    │                           TinyLLM (read first) and LLM (every switch)
     ├── steps_llm.py            4 tokens through one layer, every intermediate printed
     ├── run_llm.py              the whole model, dissected - dense against MoE
     ├── diagrams.py             SVG sources for the RoPE and attention notes

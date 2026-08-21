@@ -38,10 +38,11 @@ _here = Path(__file__).resolve().parent
 SCRATCH = os.environ.get("LLM_IMPL", "common") in ("scratch", "from_scratch")
 if SCRATCH:
     sys.path.insert(0, str(_here / "from_scratch"))
-    from llm import LLMConfig, TinyLLM, rope_tables, apply_rope, build
+    # the exercise's TinyLLM IS the full model - common.py calls that one LLM
+    from llm import LLMConfig, TinyLLM as LLM, rope_tables, apply_rope, build
 else:
     sys.path.insert(0, str(_here))
-    from common import (LLMConfig, TinyLLM, rope_tables, apply_rope, build,
+    from common import (LLMConfig, LLM, rope_tables, apply_rope, build,
                         CausalSelfAttention, VanillaSelfAttention, sinusoidal_pe)
 
 torch.manual_seed(0)
@@ -60,7 +61,7 @@ def hdr(s):
 B, T = 2, 12
 cfg = LLMConfig(vocab_size=32, d_model=64, n_layers=3, n_heads=4, n_kv_heads=2,
                 d_ff=128, max_seq=32)
-model = TinyLLM(cfg)
+model = LLM(cfg)
 ids = torch.randint(0, cfg.vocab_size, (B, T))
 
 
@@ -146,7 +147,7 @@ if SCRATCH:
 
 if not SCRATCH:
     van_cfg = replace(cfg, attn="vanilla", n_kv_heads=cfg.n_heads)
-    van = TinyLLM(van_cfg).eval()
+    van = LLM(van_cfg).eval()
     van_base, _ = van(ids)
 
     print("Attention Is All You Need, unchanged: sinusoidal position ADDED to the")
@@ -233,7 +234,7 @@ if not SCRATCH:
     def _train(masked, steps=400):
         torch.manual_seed(0)
         _c.scaled_dot_product = _sdp if masked else _unmasked
-        mm = TinyLLM(mcfg)
+        mm = LLM(mcfg)
         opt = torch.optim.AdamW(mm.parameters(), lr=3e-3)
         for _ in range(steps):
             bb = torch.randint(0, MV, (64, MT + 1))
@@ -365,7 +366,7 @@ print("with vocabulary instead of with depth, so it dominates until the model")
 print("is big enough to outgrow it. Same code, vocab=32,000:\n")
 print(f"  {'d_model':>8} {'layers':>7} {'total':>12} {'non-embed':>12} {'embed %':>9}")
 for d, L in ((64, 3), (256, 6), (512, 12), (1024, 24)):
-    m = TinyLLM(LLMConfig(vocab_size=32000, d_model=d, n_layers=L, n_heads=8,
+    m = LLM(LLMConfig(vocab_size=32000, d_model=d, n_layers=L, n_heads=8,
                           d_ff=4 * d, max_seq=64))
     print(f"  {d:>8} {L:>7} {m.n_params():>12,} {m.n_params(True):>12,} "
           f"{100 * m.embed.weight.numel() / m.n_params():>8.1f}%")
