@@ -7,10 +7,32 @@ and diagnoses the specific mistake without giving up the answer.
 python LLM/from_scratch/check.py        # run this constantly
 ```
 
-## Two self-contained side exercises
+## Three self-contained side exercises
 
-Both are separate from `llm.py` and import nothing from the rest of the track,
-so either can be done first.
+Each is separate from `llm.py`, and each isolates one idea that stage 3 below
+asks for all at once. Do them in this order and stage 3 stops being four things
+at the same time.
+
+### `gqa.py` — grouped query attention
+
+The one change the 2017 layer did not have, on its own: several query heads
+sharing one key/value head. Orthogonal to RoPE, so there is none here.
+
+```bash
+python LLM/from_scratch/check_gqa.py    # run this constantly
+python LLM/from_scratch/gqa.py          # print the grouping and the saving
+```
+
+| # | What | The idea |
+|---|------|----------|
+| 1 | `repeat_kv` (E11) | The expansion, and the grouping it must use: head `h` reads kv group `floor(h / n_rep)`, so the groups have to come out contiguous. |
+| 2 | `GroupedQueryAttention` (E6, E11) | Narrower k/v, the layer around them, and the cache. |
+| 3 | `kv_cache_floats_per_token` (E40) | What the whole thing is for — and what it does *not* buy. |
+
+The check worth the exercise is in stage 2: expand the kv heads *before* you
+store them and the output is still exactly right, the shapes are still exactly
+right, and the entire saving is gone. The grader looks at how many heads your
+cache is holding.
 
 ### `attention.py` — the 2017 attention layer
 
