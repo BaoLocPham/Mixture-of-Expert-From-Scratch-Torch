@@ -7,6 +7,36 @@ and diagnoses the specific mistake without giving up the answer.
 python LLM/from_scratch/check.py        # run this constantly
 ```
 
+## Two self-contained side exercises
+
+Both are separate from `llm.py` and import nothing from the rest of the track,
+so either can be done first.
+
+### `attention.py` — the 2017 attention layer
+
+*Attention Is All You Need*, exactly as written: sinusoidal position added at
+the input, every query head with its own key and value, biases on all four
+projections. Build that before the modern layer and stage 3 below stops being
+four ideas at once.
+
+```bash
+python LLM/from_scratch/check_attention.py    # run this constantly
+python LLM/from_scratch/attention.py          # print your own scores and look at them
+```
+
+| # | What | The idea |
+|---|------|----------|
+| 1 | `sinusoidal_pe` | Where position enters in 2017 — added once, before any block, sin and cos interleaved. |
+| 2 | `split_heads`, `merge_heads` | One projection read as `n_h` heads, and the exact inverse. |
+| 3 | `scaled_dot_product` (E9, E10) | Score, scale, mask, softmax, weight. The whole idea, in four lines. |
+| 4 | `VanillaSelfAttention` (E6, E11) | Four projections around the middle three steps, plus a KV cache. |
+
+It names nine wrong implementations by their output, among them: the position
+table concatenated instead of interleaved, `split_heads` handing head 0 the
+strided columns, no `1/sqrt(d_h)`, no mask, the mask applied *after* the
+softmax, a `tril` mask that ignores the cache offset, and heads reshaped
+without being transposed back.
+
 ## Start here if you want RoPE on its own
 
 `rope.py` is a separate, self-contained exercise for the one piece of this

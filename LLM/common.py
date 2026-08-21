@@ -457,6 +457,79 @@ def sinusoidal_pe(max_seq, d_model, base=10000.0, device=None):
     return pe
 
 
+def split_heads(t, n_heads):
+    r"""(B, T, n_h*d_h) -> (B, n_h, T, d_h). Step 2 of the layer.
+
+    Two moves and no arithmetic:
+
+      view      cuts the row into n_h CONTIGUOUS blocks - head h is columns
+                h*d_h : (h+1)*d_h, so element (h, j) is element h*d_h + j of the
+                row. A view cannot move data, so which columns belong to head h
+                was decided by how the projection's weight matrix was laid out,
+                not by this line.
+      transpose puts the head axis in front. torch.matmul treats the last two
+                axes as the matrix and batches over everything before them, so
+                (T, d_h) has to be the trailing pair - and in (B, T, n_h, d_h)
+                the head axis sits BETWEEN the two matrix axes, where it cannot
+                be batched over.
+
+    One transpose buys all n_h head-attentions as a single batched matmul.
+    """
+    B, T, w = t.shape
+    return t.view(B, T, n_heads, w // n_heads).transpose(1, 2)
+
+
+def merge_heads(t):
+    r"""(B, n_h, T, d_h) -> (B, T, n_h*d_h). `split_heads` run backwards.
+
+    `reshape`, not `view`: transpose returned a non-contiguous tensor and view
+    raises on one. That copy is the only data movement the split and its inverse
+    ever cause, and it happens once per layer, on the way out.
+    """
+    B, n_heads, T, d_head = t.shape
+    return t.transpose(1, 2).reshape(B, T, n_heads * d_head)
+
+
+def scaled_dot_product(q, k, v, causal=True):
+    r"""E9 and E10, on already-split heads. Steps 3 to 5 of the layer.
+
+        S = q k^T / sqrt(d_h)                                  E9, first half
+        A = S + M,  M_mn = 0 for n <= m, -inf for n > m         E9's mask
+        P = softmax(A)                                         E10
+        out = P v
+
+    q: (B, H, T, d_h)   k, v: (B, H, S, d_h)   ->   (B, H, T, d_h)
+
+    Three things this short function is carrying:
+
+      the divisor  a dot product of two d_h-dimensional random vectors has
+                   standard deviation sqrt(d_h), so without it the scores spread
+                   wider as heads get wider and softmax saturates toward a
+                   one-hot row, where its gradient is nearly zero. The divisor is
+                   exactly the growth rate, so the score scale stops depending on
+                   how wide you made the head.
+      the offset   query row i is the (S - T + i)-th token overall. In training
+                   S == T and the mask is a plain lower triangle; with a cache
+                   T is 1 and the single row sits at the END of the keys, all
+                   visible. That one term is what makes this line correct in both.
+      the order    masking BEFORE the softmax makes -inf an exact zero and leaves
+                   the row normalised over the survivors. Zeroing afterwards
+                   leaves rows summing to less than 1 - a quiet, position-
+                   dependent rescaling of every token.
+
+    The output rows are convex combinations of v: the weights are non-negative
+    and sum to 1, so attention can interpolate between value rows but never
+    produce one outside their span.
+    """
+    T, S, d_head = q.shape[-2], k.shape[-2], q.shape[-1]
+    att = (q @ k.transpose(-1, -2)) / d_head ** 0.5           # E9
+    if causal:
+        m = torch.arange(S - T, S, device=q.device)[:, None]  # (T, 1)  query pos
+        n = torch.arange(S, device=q.device)[None, :]         # (1, S)  key pos
+        att = att.masked_fill(n > m, float("-inf"))
+    return att.softmax(dim=-1) @ v                            # E10
+
+
 class VanillaSelfAttention(nn.Module):
     """Multi-head attention exactly as "Attention Is All You Need" wrote it.
 
@@ -495,17 +568,11 @@ class VanillaSelfAttention(nn.Module):
         self.v_proj = nn.Linear(d, d, bias=True)              # W^V
         self.o_proj = nn.Linear(d, d, bias=True)              # W^O
 
-    def _split(self, t):
-        B, T, _ = t.shape
-        return t.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-
     def forward(self, x, cos=None, sin=None, cache=None):
         """x: (B, T, d) -> (B, T, d). cos/sin are ignored - see the docstring."""
-        B, T, d = x.shape
-
-        q = self._split(self.q_proj(x))                       # (B, H, T, dh)
-        k = self._split(self.k_proj(x))                       # full width: no GQA
-        v = self._split(self.v_proj(x))
+        q = split_heads(self.q_proj(x), self.n_heads)         # 1 + 2
+        k = split_heads(self.k_proj(x), self.n_heads)         # full width: no GQA
+        v = split_heads(self.v_proj(x), self.n_heads)
 
         if cache is not None:
             if "k" in cache:
@@ -513,16 +580,8 @@ class VanillaSelfAttention(nn.Module):
                 v = torch.cat([cache["v"], v], dim=2)
             cache["k"], cache["v"] = k, v
 
-        n_keys = k.shape[2]
-        att = (q @ k.transpose(-1, -2)) / self.d_head ** 0.5  # E9
-
-        m = torch.arange(n_keys - T, n_keys, device=x.device)[:, None]
-        n = torch.arange(n_keys, device=x.device)[None, :]
-        att = att.masked_fill(n > m, float("-inf"))
-
-        p = att.softmax(dim=-1)                               # E10
-        y = (p @ v).transpose(1, 2).reshape(B, T, self.n_heads * self.d_head)
-        return self.o_proj(y)                                 # E11
+        y = scaled_dot_product(q, k, v, causal=True)          # 3, 4, 5   E9, E10
+        return self.o_proj(merge_heads(y))                    # 6         E11
 
 
 # --------------------------------------------------------------------- ffn
