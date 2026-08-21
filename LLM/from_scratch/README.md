@@ -88,14 +88,13 @@ the point of it.
 | 2 | `rope_tables`, `apply_rope` (E7, E8) | Position as a rotation. The dot product must end up seeing only `n - m`. |
 | 3 | `CausalSelfAttention` (E6, E9–E11) | Heads, GQA, the mask, the cache. **The hard one.** |
 | 4 | `Block` (E14, E15) | Pre-norm and two residuals. Easy to write, easy to write backwards. |
-| 5 | `TinyLLM` (E1, E32, E24/E29) | Tying, buffers, the loss, and `pos`. |
+| 5 | `LLM` (E1, E32, E24/E29) | Tying, buffers, the loss, and `pos`. |
 | 6 | `generate` (E33) | Sampling, and a cache that must not change the answer. |
 
-> The `TinyLLM` you build here is the **full** model — switches, cache and
-> all — which the reference calls `LLM`. `common.py` keeps the name `TinyLLM`
-> for a stripped-down version of the same thing, with no options in it, as a
-> reading aid. Stages 5 and 6 are `LLM`; the grader addresses your class by
-> the name it already has.
+> Stage 5's class is called `LLM`, matching `../common.py`. That file also has
+> a `TinyLLM` — the same model with every option stripped out, no switches and
+> no cache — which exists to be *read*, not built. What you build here is the
+> full one.
 
 The grader knows several specific wrong implementations by their *output* and
 will name them:

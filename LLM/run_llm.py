@@ -38,8 +38,7 @@ _here = Path(__file__).resolve().parent
 SCRATCH = os.environ.get("LLM_IMPL", "common") in ("scratch", "from_scratch")
 if SCRATCH:
     sys.path.insert(0, str(_here / "from_scratch"))
-    # the exercise's TinyLLM IS the full model - common.py calls that one LLM
-    from llm import LLMConfig, TinyLLM as LLM, rope_tables, apply_rope, build
+    from llm import LLMConfig, LLM, rope_tables, apply_rope, build
 else:
     sys.path.insert(0, str(_here))
     from common import (LLMConfig, LLM, rope_tables, apply_rope, build,

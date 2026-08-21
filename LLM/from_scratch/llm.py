@@ -14,6 +14,10 @@ The grader and the dissector both reach into these modules by attribute name,
 so keep them: `RMSNorm.weight`; attention's `q_proj/k_proj/v_proj/o_proj`;
 `Block.norm1/attn/norm2/ffn`; the model's `embed/blocks/norm/lm_head/cos/sin`.
 
+The model class is called `LLM`, matching `../common.py`. That file also has a
+`TinyLLM` - the same model with every option stripped out, as something to read
+rather than something to build. What you build here is the full one.
+
 The FFN and the MoE layer are imported ready-made below. You built those in
 DenseMoe/from_scratch and SparseMoe/from_scratch; this exercise is the
 transformer they sit inside.
@@ -193,7 +197,7 @@ class Block(nn.Module):
 
 
 # ------------------------------------------------------------ stage 5: model
-class TinyLLM(nn.Module):
+class LLM(nn.Module):
     """E1 -> E14/E15 x L -> E32. Embedding, blocks, final norm, logits.
 
     TODO __init__:
@@ -220,10 +224,10 @@ class TinyLLM(nn.Module):
     def __init__(self, cfg: LLMConfig):
         super().__init__()
         self.cfg = cfg
-        raise NotImplementedError("stage 5: TinyLLM.__init__")
+        raise NotImplementedError("stage 5: LLM.__init__")
 
     def forward(self, idx, targets=None, caches=None, pos=0):
-        raise NotImplementedError("stage 5: TinyLLM.forward")
+        raise NotImplementedError("stage 5: LLM.forward")
 
     # ------------------------------------------------------- stage 6: sampling
     @torch.no_grad()
@@ -291,4 +295,4 @@ class TinyLLM(nn.Module):
 
 
 def build(ffn="dense", **kw):
-    return TinyLLM(LLMConfig(ffn=ffn, **kw))
+    return LLM(LLMConfig(ffn=ffn, **kw))

@@ -273,7 +273,7 @@ def stage_4():
 
 
 def stage_5():
-    m = fix(sol.TinyLLM(cfg()))
+    m = fix(sol.LLM(cfg()))
     need(hasattr(m, "cos") and hasattr(m, "sin"), "the model needs cos/sin buffers")
     need(not any(n in ("cos", "sin") for n, _ in m.named_parameters()),
          "cos/sin are parameters", "They are constants. register_buffer, and "
@@ -293,11 +293,11 @@ def stage_5():
          f"loss is {loss.item():.6f}, expected {LOSS:.6f}",
          "Flatten to (B*T, V) against (B*T,) and take the mean.")
 
-    fresh = fix(sol.TinyLLM(cfg()))
+    fresh = fix(sol.LLM(cfg()))
     _, no_target = call(fresh, IDS)
     need(no_target is None, "loss must be None when no targets are given")
 
-    mm = fix(sol.TinyLLM(cfg(ffn="moe", n_experts=4, k=2)))
+    mm = fix(sol.LLM(cfg(ffn="moe", n_experts=4, k=2)))
     _, mloss = call(mm, IDS, IDS)
     need(close(mloss, torch.tensor(MOE_LOSS), 1e-4),
          f"MoE loss is {mloss.item():.6f}, expected {MOE_LOSS:.6f}",
@@ -315,7 +315,7 @@ def stage_5():
 
 
 def stage_6():
-    m = fix(sol.TinyLLM(cfg()))
+    m = fix(sol.LLM(cfg()))
     prompt = IDS[:, :3]
 
     g = torch.Generator().manual_seed(0)
@@ -354,7 +354,7 @@ STAGES = [
     (2, "rope_tables + apply_rope", stage_2),
     (3, "CausalSelfAttention", stage_3),
     (4, "Block", stage_4),
-    (5, "TinyLLM", stage_5),
+    (5, "LLM", stage_5),
     (6, "generate", stage_6),
 ]
 
