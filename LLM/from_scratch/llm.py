@@ -53,6 +53,7 @@ from common import (FeedForward, MoEFeedForward, switch_aux_loss,   # noqa: F401
                     split_heads, merge_heads, scaled_dot_product)
 
 
+# --------------------------------- the shapes - given, nothing to write here
 @dataclass
 class LLMConfig:
     vocab_size: int = 64
@@ -80,7 +81,7 @@ class LLMConfig:
         return self.d_model // self.n_heads
 
 
-# ------------------------------------------------------------- stage 1: norm
+# ------------------------------ stage 1: norm - the first thing a block does
 class RMSNorm(nn.Module):
     """E4. Scale each row to unit root-mean-square, then apply a learned gain.
 
@@ -106,7 +107,7 @@ class RMSNorm(nn.Module):
         return x * rms * self.weight
 
 
-# --------------------------------------------------------- stage 2: position
+# ---------------------------- stage 2: position - the tables attention reads
 def rope_tables(d_head, max_seq, base=10000.0, device=None):
     """E7. Precompute the rotation angles: (cos, sin), both (max_seq, d_h/2).
 
@@ -148,7 +149,7 @@ def apply_rope(x, cos, sin):
                        x1 * s + x2 * c], dim=-1)            # of E7, applied pairwise
     return out.flatten(-2)                                  # interleave back to (…, d_h)
 
-# -------------------------------------------------------- stage 3: attention
+# ----------------- stage 3: attention - the only place tokens see each other
 class CausalSelfAttention(nn.Module):
     """E6, E9-E11 - the modern layer: grouped query heads, RoPE, a KV cache.
 
@@ -197,7 +198,13 @@ class CausalSelfAttention(nn.Module):
         raise NotImplementedError("stage 3: CausalSelfAttention.forward")
 
 
-# ------------------------------------------------------------ stage 4: block
+# ----------------------------------- the FFN slot - imported, not built here
+# FeedForward and MoEFeedForward are at the top of this file, already built:
+# you wrote them in DenseMoe/from_scratch and SparseMoe/from_scratch. They are
+# section 5 of ../common.py, in this same place in this same order.
+
+
+# --------------------------------------------- stage 4: the block - E14, E15
 class Block(nn.Module):
     """E14 and E15: attention sublayer, then FFN sublayer.
 
@@ -227,7 +234,7 @@ class Block(nn.Module):
         raise NotImplementedError("stage 4: Block.forward")
 
 
-# ------------------------------------------------------------ stage 5: model
+# ----------------------------------------- stage 5: the model - E1, E24, E32
 class LLM(nn.Module):
     """E1 -> E14/E15 x L -> E32. Embedding, blocks, final norm, logits.
 
@@ -260,7 +267,7 @@ class LLM(nn.Module):
     def forward(self, idx, targets=None, caches=None, pos=0):
         raise NotImplementedError("stage 5: LLM.forward")
 
-    # ------------------------------------------------------- stage 6: sampling
+    # --------------------------------------------------- stage 6: generate - E33
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None,
                  use_cache=True, generator=None):
@@ -325,5 +332,6 @@ class LLM(nn.Module):
         return torch.stack(loads)
 
 
+# --------------------------------- build - the shorthand the dissector calls
 def build(ffn="dense", **kw):
     return LLM(LLMConfig(ffn=ffn, **kw))
