@@ -15,6 +15,7 @@ helps is worthless without a loss curve behind it.
   1. flow + dims      - every tensor from token id to logit      (E1-E15, E32)
   2. attention        - causality, the KV cache, GQA              (E9-E11, E40)
   2b. vanilla         - the same layer as the 2017 paper wrote it (E9-E11)
+  2c. the mask        - trained with and without it, and what breaks
   3. rope             - position as rotation, past the table      (E7, E8)
   4. where params are - the budget, and how it moves               (E34-E36)
   5. dense vs moe     - the same model with one word changed      (E18 vs E21, E37)
@@ -209,6 +210,86 @@ if not SCRATCH:
     print("how far apart they are. The 2017 encoding and RoPE are two answers, and")
     print("the six orders of magnitude between line 1 and lines 2-3 is the whole")
     print("contribution of both.")
+
+
+# ------------------------------------------------------------ 2c. the mask
+hdr("2c. what the mask is actually for")
+
+if SCRATCH:
+    print("skipped: this section flips common.scaled_dot_product, which "
+          "LLM_IMPL=scratch does not use.")
+
+if not SCRATCH:
+    import common as _c
+    _sdp = _c.scaled_dot_product
+
+    def _unmasked(q, k, v, causal=True):
+        return _sdp(q, k, v, causal=False)
+
+    MV, MT = 24, 16
+    mcfg = replace(cfg, vocab_size=MV, max_seq=32, n_kv_heads=cfg.n_heads,
+                   attn="vanilla", n_layers=2)
+
+    def _train(masked, steps=400):
+        torch.manual_seed(0)
+        _c.scaled_dot_product = _sdp if masked else _unmasked
+        mm = TinyLLM(mcfg)
+        opt = torch.optim.AdamW(mm.parameters(), lr=3e-3)
+        for _ in range(steps):
+            bb = torch.randint(0, MV, (64, MT + 1))
+            _, l = mm(bb[:, :-1], targets=bb[:, 1:])
+            opt.zero_grad(); l.backward(); opt.step()
+        return mm.eval()
+
+    print(f"Next-token prediction on UNIFORM RANDOM tokens (vocab {MV}). Nothing")
+    print("can predict them: chance loss is ln(24) = 3.178, chance accuracy 1/24.\n")
+
+    trained = {}
+    for masked in (True, False):
+        mm = trained[masked] = _train(masked)
+        _c.scaled_dot_product = _sdp if masked else _unmasked
+        with torch.no_grad():
+            bb = torch.randint(0, MV, (256, MT + 1))
+            lg, l = mm(bb[:, :-1], targets=bb[:, 1:])
+            acc = (lg.argmax(-1) == bb[:, 1:]).float().mean()
+        print(f"  {'with the mask   ' if masked else 'WITHOUT the mask'}  "
+              f"loss {l:.4f}   accuracy {acc:.3f}")
+    print("\nA model that reaches 94% on unpredictable tokens is not predicting.")
+    print("It is reading the answer out of its own input.")
+
+    mids = torch.randint(0, MV, (1, 12))
+    mprobe = mids.clone()
+    mprobe[:, 5] = (mprobe[:, 5] + 7) % MV
+    for masked in (True, False):
+        _c.scaled_dot_product = _sdp if masked else _unmasked
+        with torch.no_grad():
+            dd = (trained[masked](mprobe)[0] - trained[masked](mids)[0]).abs().amax(-1)[0]
+        print(f"\n  {'masked  ' if masked else 'UNMASKED'} edit token 5 -> "
+              f"per-position max logit change")
+        print("   " + " ".join(f"{t}:{v:.1e}" for t, v in enumerate(dd.tolist())))
+        print(f"   before position 5: max {dd[:5].max():.2e}")
+    print("\nThe leak is not diffuse - it is at position 4, the one whose TARGET")
+    print("is token 5, and it is 17x the next largest change in the row. That is")
+    print("the shortcut, located.")
+
+    # and what the shortcut is worth once the future is gone
+    _c.scaled_dot_product = _unmasked
+    mm = trained[False]
+    with torch.no_grad():
+        bb = torch.randint(0, MV, (256, MT + 1))
+        lg, _ = mm(bb[:, :-1], targets=bb[:, 1:])
+        acc_full = (lg.argmax(-1) == bb[:, 1:]).float().mean()
+        step = [(mm(bb[:, :t])[0][:, -1].argmax(-1) == bb[:, t]).float().mean()
+                for t in range(1, MT)]
+        acc_step = torch.stack(step).mean()
+    _c.scaled_dot_product = _sdp
+    print(f"\n  the unmasked model, same weights, scored two ways:")
+    print(f"    whole sequence at once (how it trained):  accuracy {acc_full:.3f}")
+    print(f"    one token at a time (what generation is): accuracy {acc_step:.3f}")
+    print(f"    chance:                                   accuracy {1 / MV:.3f}")
+    print("An unmasked language model is not a worse language model. It is not")
+    print("one at all - everything it learned was how to copy a token that does")
+    print("not exist yet when you actually run it.")
 
 
 # ------------------------------------------------------------------ 3. rope

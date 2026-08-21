@@ -1693,6 +1693,118 @@ def three_codebases_diagram():
                 "LlamaAttention, step by step.", b)
 
 
+# ------------------------------------------------ 68. why the mask has to exist
+# measured: the toy LM trained 400 steps on RANDOM tokens, vocab 24, with and
+# without the causal mask, then probed by editing the token at position 5.
+MASK_LEAK = [1.4e-1, 4.3e-2, 2.8e-2, 2.9e-1, 9.6e0, 1.3e0,
+             2.0e-2, 2.7e-2, 3.9e-2, 3.1e-2, 5.8e-2, 7.7e-2]
+MASK_KEEP = [0.0, 0.0, 0.0, 0.0, 0.0, 1.8e-3,
+             6.1e-6, 5.0e-6, 4.2e-6, 4.0e-6, 3.8e-6, 3.8e-6]
+MASK_EDIT = 5
+
+
+def mask_why_diagram():
+    """What a model does with the mask taken away."""
+    n = len(MASK_LEAK)
+    b = txt(340, 24, "What happens with the mask taken away", 13, PRI, "middle",
+            "500")
+    b += txt(340, 44, "same model, same data, 400 steps on RANDOM tokens "
+             "(vocab 24, so nothing is predictable)", 11, SEC, "middle")
+
+    # --- the three numbers ---------------------------------------------------
+    y = 76
+    cols = [(96, 232, ""), (332, 128, "loss"), (464, 120, "accuracy")]
+    for x, w, lab in cols:
+        b += vcell(x, y, w, 22, "gray", lab, size=9.5, weight="500")
+    rows = [("chance  (ln 24)", "3.1781", "0.042", "gray"),
+            ("with the mask", "3.1789", "0.045", "teal"),
+            ("without the mask", "0.2022", "0.940", "coral")]
+    for i, (lab, ls, ac, ramp) in enumerate(rows):
+        yy = y + 25 + i * 25
+        b += vcell(96, yy, 232, 22, ramp, lab, size=9.5)
+        b += vcell(332, yy, 128, 22, ramp, ls, size=9.5)
+        b += vcell(464, yy, 120, 22, ramp, ac, size=9.5)
+
+    yy = y + 25 + len(rows) * 25 + 16
+    b += txt(340, yy, "The tokens are uniform random. Nothing can predict them, "
+             "and the masked model", 11.5, PRI, "middle", "500")
+    b += txt(340, yy + 18, "correctly does not \u2014 it sits at chance. The "
+             "unmasked one reaches 94%, which is", 11, SEC, "middle")
+    b += txt(340, yy + 36, "only possible if it is reading the answer.",
+             11, SEC, "middle")
+
+    # --- where the leak is ---------------------------------------------------
+    y2 = yy + 66
+    b += txt(340, y2, "Edit the token at position 5, and see which outputs move",
+             12, PRI, "middle", "500")
+
+    CW, G = 44, 6
+    x0 = (680 - (n * (CW + G) - G)) / 2
+    BAR = 62
+
+    def logh(v):
+        if v <= 0:
+            return 0.0
+        lo, hi = -5.5, 1.4                       # log10 range covering both rows
+        return max(2.0, BAR * (math.log10(v) - lo) / (hi - lo))
+
+    for tag, data, ramp, ytop in (("no mask", MASK_LEAK, "coral", y2 + 34),
+                                  ("mask", MASK_KEEP, "teal", y2 + 34 + BAR + 84)):
+        base = ytop + BAR
+        b += txt(x0, ytop - 10, tag, 10, RAMP[ramp][2], "start", "500")
+        for j, v in enumerate(data):
+            h = logh(v)
+            xx = x0 + j * (CW + G)
+            hot = (tag == "no mask" and j == MASK_EDIT - 1)
+            fill = RAMP["purple" if hot else ramp][1]
+            if h > 0:
+                b += (f'<rect x="{xx}" y="{base - h}" width="{CW}" height="{h}" '
+                      f'rx="2" fill="{fill}" opacity="{1.0 if hot else 0.8}"/>')
+            b += (f'<line x1="{xx}" y1="{base}" x2="{xx + CW}" y2="{base}" '
+                  f'stroke="{ARR}" stroke-width="0.8"/>')
+            lab = "0" if v == 0 else f"{v:.0e}".replace("e-0", "e-").replace("e+0", "e")
+            b += txt(xx + CW / 2, base + 11, lab, 7.5,
+                     RAMP["purple"][2] if hot else SEC, "middle")
+            b += txt(xx + CW / 2, base + 24, f"{j}", 8, SEC, "middle")
+        if tag == "no mask":
+            hx = x0 + (MASK_EDIT - 1) * (CW + G) + CW / 2
+            b += txt(hx, ytop - 10, "9.6", 10, RAMP["purple"][2], "middle", "500")
+            b += txt(340, base + 42, "position 4 \u2014 the one whose TARGET is "
+                     "token 5 \u2014 moves by 9.6: 7\u00d7 the next largest",
+                     10, RAMP["purple"][2], "middle", "500")
+            b += txt(340, base + 56, "and 200\u00d7 the typical one. That is the "
+                     "shortcut, located.", 10, RAMP["purple"][2], "middle")
+        else:
+            b += txt(340, base + 42, "exactly 0 before position 5, to the last "
+                     "bit. Nothing after the mask leaks backwards.",
+                     10, RAMP["teal"][2], "middle")
+
+    # --- the punchline -------------------------------------------------------
+    y3 = y2 + 34 + 2 * BAR + 84 + 76
+    b += txt(340, y3, "And then you try to generate with it", 12, PRI, "middle",
+             "500")
+    rows2 = [("scored the way it trained \u2014 whole sequence at once", "0.941",
+              "coral"),
+             ("scored the way generation works \u2014 one token at a time",
+              "0.043", "gray"),
+             ("chance", "0.042", "gray")]
+    for i, (lab, v, ramp) in enumerate(rows2):
+        yy3 = y3 + 22 + i * 25
+        b += vcell(96, yy3, 372, 22, ramp, lab, size=9.5)
+        b += vcell(472, yy3, 112, 22, ramp, v, size=9.5)
+
+    y4 = y3 + 22 + len(rows2) * 25 + 18
+    b += txt(340, y4, "The same weights. 0.941 when the future is in the input, "
+             "chance when it is not.", 11.5, PRI, "middle", "500")
+    b += txt(340, y4 + 20, "An unmasked language model is not a worse language "
+             "model. It is not one at all:", 11, SEC, "middle")
+    b += txt(340, y4 + 38, "everything it learned was how to copy a token it will "
+             "not have at inference.", 11, SEC, "middle")
+    return wrap(680, y4 + 66, "Why the causal mask exists",
+                "A model trained with and without the mask, and what the "
+                "difference costs.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1715,6 +1827,7 @@ DIAGRAMS = {
     "65_rope_half_trace.svg": rope_half_trace_diagram,
     "66_two_attentions.svg": two_attentions_diagram,
     "67_three_codebases.svg": three_codebases_diagram,
+    "68_mask_why.svg": mask_why_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
