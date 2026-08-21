@@ -1883,6 +1883,104 @@ def repeat_kv_order_diagram():
                 "twice the memory.", b)
 
 
+# ------------------------------------- 70. why q and o are wide, k and v narrow
+def gqa_widths_diagram():
+    """Which projections n_kv is allowed to shrink, and which it is not."""
+    NH, NKV, DHW = 4, 2, 16
+    b = txt(340, 24, "Why q and o stay full width, and k and v do not",
+            13, PRI, "middle", "500")
+    b += txt(340, 44, f"n_h = {NH}, n_kv = {NKV}, d_h = {DHW}, d = {NH * DHW}",
+             11, SEC, "middle")
+
+    # --- the four projections, drawn to scale -------------------------------
+    UNIT, x0 = 84, 200
+    rows = [("q_proj", NH, "one query per query head", "purple"),
+            ("k_proj", NKV, "one key per GROUP", "coral"),
+            ("v_proj", NKV, "one value per GROUP", "coral"),
+            ("o_proj", NH, "one input slot per head OUTPUT", "purple")]
+    y = 80
+    for name, n, note, ramp in rows:
+        b += txt(x0 - 12, y + 13, name, 10.5, PRI, "end", "500")
+        for i in range(n):
+            grp = i // (NH // NKV) if n == NH else i
+            lab = ("h" if n == NH else "kv") + str(i)
+            b += vcell(x0 + i * (UNIT + 2), y, UNIT, 26, PAIR_RAMP[grp * 2],
+                       lab, size=9.5)
+        w = n * DHW
+        b += txt(x0 + n * (UNIT + 2) + 8, y + 13,
+                 f"{w} = {n}\u00b7d_h", 9.5, RAMP[ramp][2], "start", "500")
+        b += txt(340, y + 40, note, 9, SEC, "middle")
+        y += 52
+
+    yy = y + 2
+    b += txt(340, yy, "o_proj is the odd one: it is the only projection whose "
+             "width is set by its INPUT.", 11.5, PRI, "middle", "500")
+    b += txt(340, yy + 20, "It consumes the concatenation of the head outputs "
+             "and maps it back to d, so what", 11, SEC, "middle")
+    b += txt(340, yy + 38, "matters is how many head outputs there are \u2014 "
+             "and that is n_h, not n_kv.", 11, SEC, "middle")
+
+    # --- why there are still n_h outputs ------------------------------------
+    y2 = yy + 70
+    b += txt(340, y2, "Sharing k and v does not merge heads", 12, PRI, "middle",
+             "500")
+    b += txt(340, y2 + 16, "colour = which group; the two heads in a group read "
+             "identical keys and values", 9.5, SEC, "middle")
+    CW, G2 = 116, 12
+    xs = [128 + i * (CW + G2) for i in range(NH)]
+
+    lab_y = y2 + 34
+    for i, x in enumerate(xs):
+        b += vcell(x, lab_y, CW, 24, PAIR_RAMP[i // (NH // NKV) * 2],
+                   f"query head {i}", size=9.5)
+    kv_y = lab_y + 46
+    for g in range(NKV):
+        gx = xs[g * 2] + (CW + G2) / 2
+        b += vcell(gx, kv_y, CW, 24, PAIR_RAMP[g * 2], f"k,v group {g}", size=9.5)
+        for i in (g * 2, g * 2 + 1):
+            b += arrow(xs[i] + CW / 2, lab_y + 26, gx + CW / 2, kv_y - 3)
+    out_y = kv_y + 46
+    for i, x in enumerate(xs):
+        b += vcell(x, out_y, CW, 24, PAIR_RAMP[i // (NH // NKV) * 2],
+                   f"output {i}", size=9.5)
+        b += arrow(xs[i // 2 * 2] + (CW + G2) / 2 + CW / 2, kv_y + 26,
+                   x + CW / 2, out_y - 3)
+
+    y3 = out_y + 40
+    b += txt(340, y3, "Heads 0 and 1 read the SAME keys and still produce "
+             "different outputs, because", 11, SEC, "middle")
+    b += txt(340, y3 + 18, "their queries differ \u2014 different scores, "
+             "different weighted averages of the same", 11, SEC, "middle")
+    b += txt(340, y3 + 36, "values. Four questions asked of two sources is "
+             "still four answers.", 11, SEC, "middle")
+
+    y4 = y3 + 64
+    b += vcell(96, y4, 488, 28, "teal",
+               "q sets how many questions are asked. k and v set how many "
+               "sources exist.", size=11, weight="500")
+    b += txt(340, y4 + 46, "So n_kv can shrink the sources without touching "
+             "the questions or the answers \u2014", 11, PRI, "middle", "500")
+    b += txt(340, y4 + 64, "which is why the model keeps every attention "
+             "pattern it had, and why the only", 11, SEC, "middle")
+    b += txt(340, y4 + 82, "thing that gets smaller is what has to be stored.",
+             11, SEC, "middle")
+
+    y5 = y4 + 112
+    b += txt(340, y5, "Parameter count, per layer", 11.5, PRI, "middle", "500")
+    d = NH * DHW
+    pq, pk, po = d * d, d * (NKV * DHW), d * d
+    b += vcell(140, y5 + 20, 176, 24, "gray", "q_proj + o_proj", size=9.5)
+    b += vcell(318, y5 + 20, 120, 24, "purple", f"2\u00b7d\u00b2 = {2 * pq:,}",
+               size=9.5)
+    b += txt(446, y5 + 32, "untouched by n_kv", 9, SEC, "start")
+    b += vcell(140, y5 + 47, 176, 24, "gray", "k_proj + v_proj", size=9.5)
+    b += vcell(318, y5 + 47, 120, 24, "coral",
+               f"2\u00b7d\u00b7n_kv\u00b7d_h = {2 * pk:,}", size=9.5)
+    b += txt(446, y5 + 59, "the only ones that shrink", 9, SEC, "start")
+    return wrap(680, y5 + 100, "GQA projection widths",
+                "Why n_kv narrows only the key and value projections.", b)
+
+
 DIAGRAMS = {
     "30_rope_pairing.svg": pairing_diagram,
     "31_rope_ladder.svg": ladder_diagram,
@@ -1907,6 +2005,7 @@ DIAGRAMS = {
     "67_three_codebases.svg": three_codebases_diagram,
     "68_mask_why.svg": mask_why_diagram,
     "69_repeat_kv_order.svg": repeat_kv_order_diagram,
+    "70_gqa_widths.svg": gqa_widths_diagram,
     "51_causal_mask.svg": mask_diagram,
     "52_gqa.svg": gqa_diagram,
     "53_kv_cache.svg": kv_cache_diagram,
