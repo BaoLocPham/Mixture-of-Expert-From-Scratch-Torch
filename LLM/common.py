@@ -43,6 +43,23 @@ without MoE", E1-E43), so a line here can be read next to the line there:
     alpha         aux-loss coefficient            E27       -> aux_weight
     P_tot, P_act  total, active params per token  E36, E37
 
+The file is in the order the forward pass runs, and `from_scratch/llm.py`
+follows the same order stage by stage:
+
+    1  LLMConfig                        every shape, in one place
+    2  RMSNorm              E4          the first thing a block does    -> stage 1
+    3  sinusoidal_pe                    position, added once at the input
+       rope_tables/apply_rope  E7, E8   position, applied every layer   -> stage 2
+    4  split_heads, merge_heads         a head is a reading of one matrix
+       scaled_dot_product   E9, E10     scale, mask, softmax, weight
+       VanillaSelfAttention E6, E11     the 2017 layer
+       CausalSelfAttention  E6, E11     the same, plus GQA, RoPE, cache -> stage 3
+    5  FeedForward, MoEFeedForward  E18, E21   the slot this repo is about
+    6  Block                E14, E15    two norms, two residuals        -> stage 4
+    7  TinyLLM, LLM         E1, E24, E32, E33                    -> stages 5 and 6
+
+with an appendix of reference-only functions at the end that nothing calls.
+
 Row-vector convention throughout (x is (..., d) and the maths reads xW), which
 is what nn.Linear already does.
 
@@ -58,8 +75,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-# ------------------------------------------------------------------- config
+# ------------------------------------------------------------- 1. the shapes
 @dataclass
 class LLMConfig:
     """Every shape in the model, in one place.
@@ -100,7 +116,7 @@ class LLMConfig:
         return self.d_model // self.n_heads
 
 
-# -------------------------------------------------------------------- norm
+# ------------------------------------ 2. norm - the first thing a block does
 class RMSNorm(nn.Module):
     """E4:  RMSNorm(x) = x / sqrt(mean_i x_i^2 + eps) * g.  No mean, no bias.
 
@@ -120,7 +136,44 @@ class RMSNorm(nn.Module):
         return x * rms * self.weight                                      # (..., d)
 
 
-# -------------------------------------------------------------------- rope
+# ---------------------------------------------- 3. where position comes from
+# Two schemes, and they enter the model in different places. `sinusoidal_pe`
+# is ADDED to the embedding once, before block 0, and no layer ever sees it.
+# `rope_tables` / `apply_rope` are read INSIDE every attention layer, on q
+# and k only. That difference is the whole distinction between an additive
+# absolute encoding and a multiplicative relative one.
+
+def sinusoidal_pe(max_seq, d_model, base=10000.0, device=None):
+    r"""The original absolute positional encoding (Vaswani et al., 2017).
+
+    Returns (max_seq, d_model), to be ADDED to the token embeddings once, before
+    any block runs:
+
+        PE[m, 2j]   = sin(m / b**(2j/d)),      PE[m, 2j+1] = cos(m / b**(2j/d))
+
+    Compare `rope_tables` above and the family resemblance is the point: same
+    base, same geometric frequency ladder, same pairing of channels. What
+    differs is the verb. This is ADDED to x once at the input; RoPE ROTATES q
+    and k with it inside every layer - and that difference is the whole reason
+    the dot product ends up seeing only n - m (E8) in one case and not the
+    other.
+
+    Two consequences of adding rather than rotating, both easy to miss:
+      - the signal has to survive L blocks of residual arithmetic, because
+        nothing re-injects it;
+      - position 2049 does not exist in a table built for 2048, and there is no
+        reason the model should read a gap of 3 the same way at m = 4 and at
+        m = 400 - it had to learn each offset separately.
+    """
+    m = torch.arange(max_seq, device=device).float()[:, None]      # (max_seq, 1)
+    two_j = torch.arange(0, d_model, 2, device=device).float()     # (d/2,)
+    ang = m / base ** (two_j / d_model)                            # (max_seq, d/2)
+    pe = torch.zeros(max_seq, d_model, device=device)
+    pe[:, 0::2] = ang.sin()
+    pe[:, 1::2] = ang.cos()
+    return pe
+
+
 def rope_tables(d_head, max_seq, base=10000.0, device=None):
     r"""Precompute cos/sin for E7, both (max_seq, d_h/2).
 
@@ -234,221 +287,10 @@ def apply_rope(x, cos, sin):
     return out.flatten(-2)                                      # (…, d_h)
 
 
-# ------------------------------------------------- rope: the other conventions
-# The model above uses `rope_tables` + `apply_rope` and nothing else. The three
-# functions below are reference implementations of the two variants every real
-# codebase has to deal with, kept here because they are the answers to stages 3
-# and 4 of LLM/from_scratch/rope.py. Nothing in this file calls them.
-
-
-def rotate_half(x):
-    r"""A quarter turn, for the split-half channel layout.
-
-    x: (..., d_h)  ->  (..., d_h)
-
-        [ a0 a1 a2 a3 | b0 b1 b2 b3 ]  ->  [ -b0 -b1 -b2 -b3 | a0 a1 a2 a3 ]
-
-    Why a function shaped like this exists. E7 on a pair (a, b) is
-
-        (a*cos - b*sin,  a*sin + b*cos)
-
-    which is the same as
-
-        (a, b) * cos  +  (-b, a) * sin
-
-    and (-b, a) is just (a, b) turned 90 degrees. So ANY rotation is "the
-    vector times cos, plus the vector-turned-a-quarter-turn times sin" - which
-    is e^(i.phi) = cos(phi) + i.sin(phi) written without complex numbers.
-
-    `rotate_half` is that quarter turn for a layout where a channel's partner
-    sits d_h/2 away instead of 1 - so both members of every pair live in the
-    same half of the vector, and one `cat` performs all d_h/2 quarter turns at
-    once. Applied twice it gives -x exactly, which is the cheapest test there
-    is that you have a rotation and not a shuffle.
-    """
-    h = x.shape[-1] // 2
-    return torch.cat([-x[..., h:], x[..., :h]], dim=-1)
-
-
-def apply_rope_half(x, cos, sin):
-    r"""E7 again, in the split-half ("GPT-NeoX"/HuggingFace) convention.
-
-    x: (B, H, T, d_h)   cos/sin: (T, d_h/2)   ->   (B, H, T, d_h)
-
-    Same tables, same angles, same rotation. The only difference from
-    `apply_rope` is which two channels count as a pair:
-
-        apply_rope       pairs (0,1), (2,3), (4,5), ...     partners adjacent
-        apply_rope_half  pairs (0,4), (1,5), (2,6), ...     partners d_h/2 apart
-
-    The `cat([cos, cos])` below is where that gets decided. The tables are
-    d_h/2 wide and this form needs one entry per CHANNEL, so they are
-    duplicated - and duplicating means channel j and channel j + d_h/2 read the
-    same theta_j. That one line IS the pairing, the way `x[..., 0::2]` is the
-    pairing in `apply_rope`.
-
-    The two are the same function on a permuted channel order:
-
-        perm = torch.arange(d_h).reshape(2, d_h // 2).t().reshape(-1)
-        inv  = torch.argsort(perm)
-        apply_rope_half(x, cos, sin) == apply_rope(x[..., perm], cos, sin)[..., inv]
-
-    exactly - max difference 0.0, not "close". Which is also the whole content
-    of the checkpoint story: HuggingFace implements this form, so
-    convert_llama_weights_to_hf.py bakes `perm` into the rows of W_Q and W_K
-    once, and Meta's interleaved-trained weights come out agreeing with it.
-
-    Either convention is fine on its own and E8 holds for both. Mixing them is
-    not: rotate q one way and k the other and three pairs at the same gap - which
-    must agree to ~1e-07 - come out 1.7 apart. Nothing raises. Same shapes, same
-    dtype, a model that trains and has simply lost relative position.
-    """
-    c = torch.cat([cos, cos], dim=-1)[None, None]               # (1, 1, T, d_h)
-    s = torch.cat([sin, sin], dim=-1)[None, None]
-    return x * c + rotate_half(x) * s
-
-
-def rope_tables_scaled(d_head, max_seq, base=10000.0, scale=1.0, device=None):
-    r"""Position Interpolation (Chen et al., 2023): `rope_tables` with the
-    positions divided by `scale`.
-
-    A model trained at 2k tokens has never handed pair 0 (theta = 1.0) an angle
-    above 2048 radians. Run it at 8k and that becomes 8192 - no error, cosine is
-    happy to be evaluated anywhere, but the weights have no training signal for
-    that region and quality falls off sharply.
-
-    PI's answer is to squeeze the position axis rather than extend it: position
-    m is rotated as if it were m/scale, so a `scale`x longer sequence lands
-    inside the range the model was trained on. Everything else is untouched -
-    same weights, same theta_i, same code path, no new parameters - which is why
-    it can be applied to an already-trained checkpoint.
-
-    The consequence, and the price, are the same measurement:
-
-        plain tables,  gap 1 token   ->  q.k = +0.150094
-        scaled by 4,   gap 4 tokens  ->  q.k = +0.150094      difference 0.0
-        plain tables,  gap 4 tokens  ->  q.k = -1.149394
-
-    Four tokens apart now produces exactly the score one token apart used to.
-    That is the gain (reach) and the loss (resolution) in one line: every
-    wavelength is multiplied by scale, the fast pairs included, so pair 0 goes
-    from a period of ~6.3 tokens to ~25.1 and the pair that separated adjacent
-    tokens now separates groups of four. Hence the fine-tuning PI needs.
-
-    The two methods that followed spend the same budget more carefully, and
-    neither is implemented here:
-
-      NTK-aware  raise the BASE instead, base * scale ** (d_h / (d_h - 2)).
-                 theta_i = base ** (-2i/d_h) has i = 0 in the exponent, so pair
-                 0 is base**0 = 1 whatever the base is - the fast pairs are left
-                 alone and the whole stretch lands on the slow ones.
-      YaRN       a per-pair ramp between interpolating and extrapolating, plus
-                 an attention temperature. 64k-128k on a fraction of PI's data.
-
-    scale = 1.0 reproduces `rope_tables` exactly.
-    """
-    two_i = torch.arange(0, d_head, 2, device=device).float()
-    theta = base ** (-two_i / d_head)
-    m = torch.arange(max_seq, device=device).float() / scale    # <- the method
-    ang = torch.outer(m, theta)                                 # (max_seq, d_h/2)
-    return ang.cos(), ang.sin()
-
-
-# --------------------------------------------------------------- attention
-class CausalSelfAttention(nn.Module):
-    """Multi-head causal attention with optional grouped query attention.
-
-    E6 (projections), E7 (rotation), E9 (scores + mask), E10 (softmax and the
-    per-head weighted sum), E11 (concat and W_O). The GQA rule of E11 - head h
-    reads kv group floor(h / (n_h/n_kv)) - is the repeat_interleave below.
-
-    n_kv_heads < n_heads means several query heads share one key/value head. The
-    q side is untouched, so the model keeps all its attention patterns; what
-    shrinks is the KV *cache*, which during generation is the thing that
-    actually runs out of memory. GQA is a memory-bandwidth decision, not a
-    quality one.
-    """
-
-    def __init__(self, cfg: LLMConfig):
-        super().__init__()
-        self.n_heads, self.n_kv_heads = cfg.n_heads, cfg.n_kv_heads
-        self.d_head = cfg.d_head
-        self.n_rep = cfg.n_heads // cfg.n_kv_heads          # n_h / n_kv, E11
-
-        self.q_proj = nn.Linear(cfg.d_model, cfg.n_heads * cfg.d_head, bias=False)
-        self.k_proj = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.d_head, bias=False)
-        self.v_proj = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.d_head, bias=False)
-        self.o_proj = nn.Linear(cfg.n_heads * cfg.d_head, cfg.d_model, bias=False)
-
-    def forward(self, x, cos, sin, cache=None):
-        """x: (B, T, d) -> (B, T, d).
-
-        cache: None, or a dict with 'k'/'v' holding everything seen so far. With
-        a cache, T is usually 1 and the past is read rather than recomputed.
-        """
-        B, T, d = x.shape
-
-        q = split_heads(self.q_proj(x), self.n_heads)        # (B, H,   T, dh)
-        k = split_heads(self.k_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
-        v = split_heads(self.v_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
-
-        # RoPE goes on q and k only. v carries content, not position - rotating
-        # it would rotate the thing being retrieved instead of the address.
-        q = apply_rope(q, cos, sin)
-        k = apply_rope(k, cos, sin)
-
-        if cache is not None:
-            if "k" in cache:
-                k = torch.cat([cache["k"], k], dim=2)        # (B, Hkv, T_past+T, dh)
-                v = torch.cat([cache["v"], v], dim=2)
-            cache["k"], cache["v"] = k, v
-
-        # One kv head serves n_rep query heads: repeat it so the einsum lines up.
-        # repeat_interleave, not repeat - head h of the q side must land next to
-        # its own group, and repeat would interleave the groups wrongly.
-        if self.n_rep > 1:
-            k = k.repeat_interleave(self.n_rep, dim=1)       # (B, H, S, dh)
-            v = v.repeat_interleave(self.n_rep, dim=1)
-
-        # Scale, mask, softmax, weighted sum - the same three lines the 2017
-        # layer runs, and the same function. The mask's (S - T) offset is what
-        # makes it correct here with a cache (T = 1, S = everything so far) as
-        # well as in training, where S == T.
-        y = scaled_dot_product(q, k, v, causal=True)         # E9, E10
-        return self.o_proj(merge_heads(y))                   # (B, T, d)  E11
-
-
-# ------------------------------------------------- attention, the 2017 version
-def sinusoidal_pe(max_seq, d_model, base=10000.0, device=None):
-    r"""The original absolute positional encoding (Vaswani et al., 2017).
-
-    Returns (max_seq, d_model), to be ADDED to the token embeddings once, before
-    any block runs:
-
-        PE[m, 2j]   = sin(m / b**(2j/d)),      PE[m, 2j+1] = cos(m / b**(2j/d))
-
-    Compare `rope_tables` above and the family resemblance is the point: same
-    base, same geometric frequency ladder, same pairing of channels. What
-    differs is the verb. This is ADDED to x once at the input; RoPE ROTATES q
-    and k with it inside every layer - and that difference is the whole reason
-    the dot product ends up seeing only n - m (E8) in one case and not the
-    other.
-
-    Two consequences of adding rather than rotating, both easy to miss:
-      - the signal has to survive L blocks of residual arithmetic, because
-        nothing re-injects it;
-      - position 2049 does not exist in a table built for 2048, and there is no
-        reason the model should read a gap of 3 the same way at m = 4 and at
-        m = 400 - it had to learn each offset separately.
-    """
-    m = torch.arange(max_seq, device=device).float()[:, None]      # (max_seq, 1)
-    two_j = torch.arange(0, d_model, 2, device=device).float()     # (d/2,)
-    ang = m / base ** (two_j / d_model)                            # (max_seq, d/2)
-    pe = torch.zeros(max_seq, d_model, device=device)
-    pe[:, 0::2] = ang.sin()
-    pe[:, 1::2] = ang.cos()
-    return pe
-
+# ----------------------- 4. attention - the only place tokens see each other
+# Six steps: project, split, score+scale, mask, softmax+weight, merge.
+# The middle three are `scaled_dot_product` and are identical in both
+# layers below; the two classes differ only in what they do around it.
 
 def split_heads(t, n_heads):
     r"""(B, T, n_h*d_h) -> (B, n_h, T, d_h). Step 2 of the layer.
@@ -577,7 +419,70 @@ class VanillaSelfAttention(nn.Module):
         return self.o_proj(merge_heads(y))                    # 6         E11
 
 
-# --------------------------------------------------------------------- ffn
+class CausalSelfAttention(nn.Module):
+    """Multi-head causal attention with optional grouped query attention.
+
+    E6 (projections), E7 (rotation), E9 (scores + mask), E10 (softmax and the
+    per-head weighted sum), E11 (concat and W_O). The GQA rule of E11 - head h
+    reads kv group floor(h / (n_h/n_kv)) - is the repeat_interleave below.
+
+    n_kv_heads < n_heads means several query heads share one key/value head. The
+    q side is untouched, so the model keeps all its attention patterns; what
+    shrinks is the KV *cache*, which during generation is the thing that
+    actually runs out of memory. GQA is a memory-bandwidth decision, not a
+    quality one.
+    """
+
+    def __init__(self, cfg: LLMConfig):
+        super().__init__()
+        self.n_heads, self.n_kv_heads = cfg.n_heads, cfg.n_kv_heads
+        self.d_head = cfg.d_head
+        self.n_rep = cfg.n_heads // cfg.n_kv_heads          # n_h / n_kv, E11
+
+        self.q_proj = nn.Linear(cfg.d_model, cfg.n_heads * cfg.d_head, bias=False)
+        self.k_proj = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.d_head, bias=False)
+        self.v_proj = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.d_head, bias=False)
+        self.o_proj = nn.Linear(cfg.n_heads * cfg.d_head, cfg.d_model, bias=False)
+
+    def forward(self, x, cos, sin, cache=None):
+        """x: (B, T, d) -> (B, T, d).
+
+        cache: None, or a dict with 'k'/'v' holding everything seen so far. With
+        a cache, T is usually 1 and the past is read rather than recomputed.
+        """
+        B, T, d = x.shape
+
+        q = split_heads(self.q_proj(x), self.n_heads)        # (B, H,   T, dh)
+        k = split_heads(self.k_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
+        v = split_heads(self.v_proj(x), self.n_kv_heads)     # (B, Hkv, T, dh)
+
+        # RoPE goes on q and k only. v carries content, not position - rotating
+        # it would rotate the thing being retrieved instead of the address.
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
+
+        if cache is not None:
+            if "k" in cache:
+                k = torch.cat([cache["k"], k], dim=2)        # (B, Hkv, T_past+T, dh)
+                v = torch.cat([cache["v"], v], dim=2)
+            cache["k"], cache["v"] = k, v
+
+        # One kv head serves n_rep query heads: repeat it so the einsum lines up.
+        # repeat_interleave, not repeat - head h of the q side must land next to
+        # its own group, and repeat would interleave the groups wrongly.
+        if self.n_rep > 1:
+            k = k.repeat_interleave(self.n_rep, dim=1)       # (B, H, S, dh)
+            v = v.repeat_interleave(self.n_rep, dim=1)
+
+        # Scale, mask, softmax, weighted sum - the same three lines the 2017
+        # layer runs, and the same function. The mask's (S - T) offset is what
+        # makes it correct here with a cache (T = 1, S = everything so far) as
+        # well as in training, where S == T.
+        y = scaled_dot_product(q, k, v, causal=True)         # E9, E10
+        return self.o_proj(merge_heads(y))                   # (B, T, d)  E11
+
+
+# ------------------------------------ 5. the FFN slot - the one MoE replaces
 class FeedForward(nn.Module):
     """SwiGLU feed-forward - E18:
 
@@ -666,7 +571,7 @@ class MoEFeedForward(nn.Module):
         return F.one_hot(topi, self.n_experts).sum(dim=(0, 1))
 
 
-# ------------------------------------------------------------------- block
+# --------------------------------------------------- 6. the block - E14, E15
 class Block(nn.Module):
     """Pre-norm residual block - E14 and E15:
 
@@ -700,7 +605,7 @@ class Block(nn.Module):
         return x + self.ffn(self.norm2(x)), None
 
 
-# ------------------------------------------------------------------- model
+# -------------------------------------------------------------- 7. the model
 class TinyLLM(nn.Module):
     r"""A decoder-only language model, with nothing optional in it.
 
@@ -965,3 +870,120 @@ class LLM(nn.Module):
 def build(ffn="dense", **kw):
     """Shorthand used by the dissector: build(ffn="moe", n_experts=8, k=2)."""
     return LLM(LLMConfig(ffn=ffn, **kw))
+
+
+# ----------------------- appendix: reference only, never called by the model
+# The RoPE variants every real codebase has to deal with, and the answers to
+# stages 3 and 4 of LLM/from_scratch/rope.py.
+
+def rotate_half(x):
+    r"""A quarter turn, for the split-half channel layout.
+
+    x: (..., d_h)  ->  (..., d_h)
+
+        [ a0 a1 a2 a3 | b0 b1 b2 b3 ]  ->  [ -b0 -b1 -b2 -b3 | a0 a1 a2 a3 ]
+
+    Why a function shaped like this exists. E7 on a pair (a, b) is
+
+        (a*cos - b*sin,  a*sin + b*cos)
+
+    which is the same as
+
+        (a, b) * cos  +  (-b, a) * sin
+
+    and (-b, a) is just (a, b) turned 90 degrees. So ANY rotation is "the
+    vector times cos, plus the vector-turned-a-quarter-turn times sin" - which
+    is e^(i.phi) = cos(phi) + i.sin(phi) written without complex numbers.
+
+    `rotate_half` is that quarter turn for a layout where a channel's partner
+    sits d_h/2 away instead of 1 - so both members of every pair live in the
+    same half of the vector, and one `cat` performs all d_h/2 quarter turns at
+    once. Applied twice it gives -x exactly, which is the cheapest test there
+    is that you have a rotation and not a shuffle.
+    """
+    h = x.shape[-1] // 2
+    return torch.cat([-x[..., h:], x[..., :h]], dim=-1)
+
+
+def apply_rope_half(x, cos, sin):
+    r"""E7 again, in the split-half ("GPT-NeoX"/HuggingFace) convention.
+
+    x: (B, H, T, d_h)   cos/sin: (T, d_h/2)   ->   (B, H, T, d_h)
+
+    Same tables, same angles, same rotation. The only difference from
+    `apply_rope` is which two channels count as a pair:
+
+        apply_rope       pairs (0,1), (2,3), (4,5), ...     partners adjacent
+        apply_rope_half  pairs (0,4), (1,5), (2,6), ...     partners d_h/2 apart
+
+    The `cat([cos, cos])` below is where that gets decided. The tables are
+    d_h/2 wide and this form needs one entry per CHANNEL, so they are
+    duplicated - and duplicating means channel j and channel j + d_h/2 read the
+    same theta_j. That one line IS the pairing, the way `x[..., 0::2]` is the
+    pairing in `apply_rope`.
+
+    The two are the same function on a permuted channel order:
+
+        perm = torch.arange(d_h).reshape(2, d_h // 2).t().reshape(-1)
+        inv  = torch.argsort(perm)
+        apply_rope_half(x, cos, sin) == apply_rope(x[..., perm], cos, sin)[..., inv]
+
+    exactly - max difference 0.0, not "close". Which is also the whole content
+    of the checkpoint story: HuggingFace implements this form, so
+    convert_llama_weights_to_hf.py bakes `perm` into the rows of W_Q and W_K
+    once, and Meta's interleaved-trained weights come out agreeing with it.
+
+    Either convention is fine on its own and E8 holds for both. Mixing them is
+    not: rotate q one way and k the other and three pairs at the same gap - which
+    must agree to ~1e-07 - come out 1.7 apart. Nothing raises. Same shapes, same
+    dtype, a model that trains and has simply lost relative position.
+    """
+    c = torch.cat([cos, cos], dim=-1)[None, None]               # (1, 1, T, d_h)
+    s = torch.cat([sin, sin], dim=-1)[None, None]
+    return x * c + rotate_half(x) * s
+
+
+def rope_tables_scaled(d_head, max_seq, base=10000.0, scale=1.0, device=None):
+    r"""Position Interpolation (Chen et al., 2023): `rope_tables` with the
+    positions divided by `scale`.
+
+    A model trained at 2k tokens has never handed pair 0 (theta = 1.0) an angle
+    above 2048 radians. Run it at 8k and that becomes 8192 - no error, cosine is
+    happy to be evaluated anywhere, but the weights have no training signal for
+    that region and quality falls off sharply.
+
+    PI's answer is to squeeze the position axis rather than extend it: position
+    m is rotated as if it were m/scale, so a `scale`x longer sequence lands
+    inside the range the model was trained on. Everything else is untouched -
+    same weights, same theta_i, same code path, no new parameters - which is why
+    it can be applied to an already-trained checkpoint.
+
+    The consequence, and the price, are the same measurement:
+
+        plain tables,  gap 1 token   ->  q.k = +0.150094
+        scaled by 4,   gap 4 tokens  ->  q.k = +0.150094      difference 0.0
+        plain tables,  gap 4 tokens  ->  q.k = -1.149394
+
+    Four tokens apart now produces exactly the score one token apart used to.
+    That is the gain (reach) and the loss (resolution) in one line: every
+    wavelength is multiplied by scale, the fast pairs included, so pair 0 goes
+    from a period of ~6.3 tokens to ~25.1 and the pair that separated adjacent
+    tokens now separates groups of four. Hence the fine-tuning PI needs.
+
+    The two methods that followed spend the same budget more carefully, and
+    neither is implemented here:
+
+      NTK-aware  raise the BASE instead, base * scale ** (d_h / (d_h - 2)).
+                 theta_i = base ** (-2i/d_h) has i = 0 in the exponent, so pair
+                 0 is base**0 = 1 whatever the base is - the fast pairs are left
+                 alone and the whole stretch lands on the slow ones.
+      YaRN       a per-pair ramp between interpolating and extrapolating, plus
+                 an attention temperature. 64k-128k on a fraction of PI's data.
+
+    scale = 1.0 reproduces `rope_tables` exactly.
+    """
+    two_i = torch.arange(0, d_head, 2, device=device).float()
+    theta = base ** (-two_i / d_head)
+    m = torch.arange(max_seq, device=device).float() / scale    # <- the method
+    ang = torch.outer(m, theta)                                 # (max_seq, d_h/2)
+    return ang.cos(), ang.sin()

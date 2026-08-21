@@ -22,6 +22,19 @@ The FFN and the MoE layer are imported ready-made below. You built those in
 DenseMoe/from_scratch and SparseMoe/from_scratch; this exercise is the
 transformer they sit inside.
 
+The stages are in the order the forward pass runs, matching `../common.py`
+section for section:
+
+    1  RMSNorm              E4          the first thing a block does
+    2  rope_tables/apply_rope  E7, E8   position, applied inside every layer
+    3  CausalSelfAttention  E6, E9-E11  heads, GQA, the cache
+    -  the FFN slot         E18, E21    imported - you built it in the MoE tracks
+    4  Block                E14, E15    two norms, two residuals
+    5  LLM                  E1, E24, E32
+    6  generate             E33
+
+Each stage is checked before the next one needs it, so work top to bottom.
+
 `split_heads`, `merge_heads` and `scaled_dot_product` come in ready-made too.
 You built those in attention.py, and they are the 2017 layer unchanged - so
 stage 3 here is only what a modern layer adds on top of it.
